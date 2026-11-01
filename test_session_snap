@@ -38,7 +38,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import quote
 
-VERSION = "1.7.9"  # must equal VERSION of the program it tests (used by --install/--update)
+VERSION = "1.7.10"  # must equal VERSION of the program it tests (used by --install/--update)
 HERE = Path(__file__).resolve().parent
 _DEFAULT = HERE / "session-snap" if (HERE / "session-snap").is_file() else HERE / "session-snap.py"
 SCRIPT = Path(os.environ.get("SESSION_SNAP_SCRIPT", _DEFAULT))
@@ -594,6 +594,8 @@ class T3_Restore(Base):
         screen += read(2)
         os.waitpid(pid, 0)
         self.assertIn("werden muss.mkv", screen)  # long path shown completely
+        for word in str(self.film).split():      # no word cut at the right edge
+            self.assertIn(word, screen)
         self.assertIn("Ergebnis: 1 gestartet", screen)
         self.assertIn(str(self.png), screen)
         self.wait_for(lambda: [e["files"] for e in self.entries()] == [[str(self.png)]],

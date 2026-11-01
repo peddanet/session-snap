@@ -51,7 +51,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 import xml.etree.ElementTree as ET
 
-VERSION = "1.7.9"
+VERSION = "1.7.10"
 FILE_PREFIX = "session-snap_"
 
 # --------------------------------------------------------------------------- paths
@@ -745,7 +745,9 @@ def desktop_aliases() -> dict:
                 toks = [t for t in toks[1:] if "=" not in t and not t.startswith("-")]
             if not toks or os.path.basename(toks[0]) in GENERIC_NAMES:
                 continue
-            names = {a["id"].removesuffix(".desktop")} | ({a["wmclass"]} if a["wmclass"] else set())
+            names = {a["id"].removesuffix(".desktop")}
+            if a["wmclass"]:
+                names.add(a["wmclass"])
             out.setdefault(os.path.basename(toks[0]), set()).update(names)
         _ALIAS_CACHE.clear()
         _ALIAS_CACHE[key] = out
@@ -3253,8 +3255,8 @@ def checklist_folding(title: str, entries: list, preselect: list,
                 elif r[0] == "hdr":
                     rendered.append(_fold_header(r[1], r[2], entries, sel, j == cur,
                                                  r[1] in expanded, w))
-                else:
-                    rendered.append(_render_row(r, w, j == cur, entries, sel, running))
+                else:    # entries are drawn 4 columns further right: wrap 4 narrower
+                    rendered.append(_render_row(r, w - 4, j == cur, entries, sel, running))
             heights = [len(x) for x in rendered]
             top = min(top, cur)
             while top < cur and sum(heights[top:cur + 1]) > body_h:
