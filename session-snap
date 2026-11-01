@@ -44,13 +44,14 @@ import struct
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 import xml.etree.ElementTree as ET
 
-VERSION = "1.7.0"
+VERSION = "1.7.9"
 FILE_PREFIX = "session-snap_"
 
 # --------------------------------------------------------------------------- paths
@@ -132,12 +133,28 @@ BROWSER_FLATPAKS = {"org.mozilla.firefox", "com.google.Chrome", "org.chromium.Ch
 # VLC: --no-one-instance-when-started-from-file, because VLC (default "Use only one instance
 # when started from file manager" = enabled) would otherwise hand every further file to the
 # first instance, which REPLACES the current item - only the last video would survive.
+# VLC: --input-repeat=65535 plays the video again and again. Measured with VLC 3.0.20:
+# --loop/--repeat restart the playlist item and --start-paused pauses it again on every pass;
+# --input-repeat seeks back to the start inside the same input (MainLoopTryRepeat in
+# src/input/input.c), so the video keeps playing after the first start.
+# eog 45: --fullscreen = its own fullscreen mode (like double-click: no header bar, black
+# background). The flag also reaches an already running eog instance (startup flags are sent
+# as platform data, eog-application.c), so every new window opens fullscreen. Image viewer
+# options are only used while images are in "fullscreen" (config) - see restore.
 DEFAULT_PLAYER_OPTIONS = {"mpv": ["--pause"],
-                          "vlc": ["--start-paused", "--no-one-instance-when-started-from-file"]}
-# categories whose windows are maximized after a restore (config key "maximize")
+                          "vlc": ["--start-paused", "--input-repeat=65535",
+                                  "--no-one-instance-when-started-from-file"],
+                          "eog": ["--fullscreen"], "nomacs": ["--fullscreen"]}
+# nomacs (3.16 and later): -f/--fullscreen "Start in fullscreen" (ImageLounge/src/main.cpp).
+# cosmic-viewer has NO start option: it takes its first argument as the image path
+# (cosmic-viewer/src/main.rs), an option would be opened as a file - never add one.
+# categories whose windows are maximized / shown fullscreen after a restore
+# (config keys "maximize" and "fullscreen"; a category in both is shown fullscreen)
 MAXIMIZE_KEYS = {"videos": "vlc", "images": "image", "browser": "browser", "rest": "rest"}
-DEFAULT_MAXIMIZE = "videos, images"
-PLAYER_FLATPAKS = {"io.mpv.Mpv": "mpv", "org.videolan.VLC": "vlc"}
+DEFAULT_MAXIMIZE = "videos"
+DEFAULT_FULLSCREEN = "images"
+PLAYER_FLATPAKS = {"io.mpv.Mpv": "mpv", "org.videolan.VLC": "vlc", "org.gnome.eog": "eog",
+                   "org.nomacs.ImageLounge": "nomacs"}
 # browser app windows (e.g. Claude as Chrome app): recorded as own entry, relaunched after kill
 APP_FLAGS = ("--app-id=", "--app=")
 IMAGE_VIEWERS = {
@@ -232,6 +249,8 @@ def load_config() -> dict:
            "image_viewers": set(IMAGE_VIEWERS), "video_players": set(VIDEO_PLAYERS),
            "delay": 0.4, "kill_timeout": 5.0, "maximize_timeout": 20.0, "order": "saved",
            "maximize": parse_maximize(DEFAULT_MAXIMIZE),
+           "fullscreen": parse_maximize(DEFAULT_FULLSCREEN), "overlay": True,
+           "browser_session": True,
            "player_options": {k: list(v) for k, v in DEFAULT_PLAYER_OPTIONS.items()}}
     if not CONFIG_FILE.is_file():
         return cfg
@@ -262,6 +281,14 @@ def load_config() -> dict:
         cfg["video_players"] |= set(lst("video_players"))
         if "maximize" in s:
             cfg["maximize"] = parse_maximize(s.get("maximize", ""))
+        if "fullscreen" in s:
+            cfg["fullscreen"] = parse_maximize(s.get("fullscreen", ""))
+        if "browser_session" in s:
+            cfg["browser_session"] = s.get("browser_session", "").strip().lower() not in (
+                "no", "nein", "0", "false", "off")
+        if "overlay" in s:
+            cfg["overlay"] = s.get("overlay", "").strip().lower() not in ("no", "nein", "0",
+                                                                         "false", "off")
         if s.get("order", "").strip() in ("saved", "keep"):
             cfg["order"] = s.get("order").strip()
         for key in ("delay", "kill_timeout", "maximize_timeout"):
@@ -291,17 +318,26 @@ delay = 0.4
 # Grace period after SIGTERM before a process counts as "not responding" (seconds)
 kill_timeout = 5
 # Windows maximized after a restore (COSMIC): videos, images, browser, rest, all, none
-maximize = videos, images
+maximize = videos
+# Windows shown fullscreen after a restore (COSMIC), same values; wins over "maximize"
+fullscreen = images
 # Alt-Tab order after a restore without questions (--all): saved = as recorded, keep = unchanged
 order = saved
 # Longest wait for the windows to appear (seconds)
 maximize_timeout = 20
+# Notice on top of all windows while session-snap works, with button "Abbrechen": yes / no
+overlay = yes
+# Browsers: restore the last session (all profiles, windows, tabs): yes / no
+browser_session = yes
 
-# Start options for videos on restore, per player binary name (empty value = none).
-# Default: started paused. Maximising is configured with "maximize" above.
+# Start options on restore, per program binary name (empty value = none).
+# Videos: started paused. Image viewers: only used while images are in "fullscreen" above
+# (eog --fullscreen = eog's own borderless fullscreen mode).
 [player-options]
 mpv = --pause
-vlc = --start-paused --no-one-instance-when-started-from-file
+vlc = --start-paused --input-repeat=65535 --no-one-instance-when-started-from-file
+eog = --fullscreen
+nomacs = --fullscreen
 """
 
 
@@ -584,7 +620,7 @@ def desktop_apps(include_hidden: bool = False) -> list:
                 continue
             mimes = {m.strip() for m in e.get("MimeType", "").split(";") if m.strip()}
             apps.append({"id": did, "name": e.get("Name", did), "exec": e["Exec"],
-                         "mimes": mimes})
+                         "mimes": mimes, "wmclass": e.get("StartupWMClass", "")})
     return apps
 
 
@@ -634,6 +670,86 @@ def app_launch(argv: list, launcher: list, apps: list | None = None) -> tuple[st
             return app["name"], exec_tokens(app["exec"])
     keep = [a for a in argv[1:] if a.startswith(("--user-data-dir=", "--profile-directory="))]
     return "Browser-App", launcher + keep + [flag]
+
+
+BROWSER_FAMILIES = ("chromium", "chrome", "brave", "msedge", "vivaldi")
+# Chrome-based browsers name the Wayland window of an installed web app
+# "<browser>-<app id>-<profile>" (e.g. chrome-fmgjjm...-Default); the app id is the value of
+# --app-id in the launcher entry. That is used to find app windows (e.g. Claude) that were
+# opened in an ALREADY RUNNING browser - their process command line has no --app-id.
+APPID_PREFIX = "appid:"
+
+
+def browser_family(text: str) -> str:
+    """'chrome' for /opt/google/chrome/chrome, google-chrome-stable, com.google.Chrome ..."""
+    t = text.lower()
+    return next((f for f in BROWSER_FAMILIES if f in t), "")
+
+
+def _opt_value(argv: list, name: str) -> str:
+    return next((a.split("=", 1)[1] for a in argv if a.startswith(name + "=")), "")
+
+
+def browser_app_windows(windows: list | None, apps: list) -> list:
+    """[(desktop app, exec tokens, app id)] for every open window of a browser web app."""
+    out, seen = [], set()
+    for a in apps:
+        toks = exec_tokens(a["exec"])
+        aid = _opt_value(toks, "--app-id")
+        if not aid or aid in seen or not browser_family(" ".join(toks)):
+            continue
+        if any(aid in app_id for app_id, _t in windows or []):
+            out.append((a, toks, aid))
+            seen.add(aid)
+    return out
+
+
+def app_window_entries(entries: list, windows: list | None, procs: dict,
+                       apps: list | None = None) -> list:
+    """Entries for web-app windows (e.g. Claude) found only through the window list. They
+    belong to the running browser process of the same family and user-data-dir."""
+    if not windows:
+        return []
+    have = {_opt_value(e["cmd"], "--app-id") for e in entries if e.get("app")}
+    browsers = [e for e in entries if e["category"] == CAT_BROWSER and not e.get("app")]
+    out = []
+    for a, toks, aid in browser_app_windows(windows, apps if apps is not None
+                                            else desktop_apps(include_hidden=True)):
+        if aid in have:
+            continue
+        fam, udd = browser_family(" ".join(toks)), _opt_value(toks, "--user-data-dir")
+        host = next((b for b in browsers
+                     if browser_family(" ".join([b["program"]] + b["cmd"][:1])) == fam
+                     and _opt_value(b["cmd"], "--user-data-dir") == udd), None)
+        p = procs.get(host["pid"]) if host else None
+        if p is None:
+            continue
+        out.append(dict(_entry(CAT_BROWSER, a["name"], toks, [], p, host.get("flatpak", ""),
+                               host.get("protect", "")), app=True))
+    return out
+
+
+_ALIAS_CACHE: dict = {}
+
+
+def desktop_aliases() -> dict:
+    """{binary name: {desktop id, StartupWMClass}} - the names under which COSMIC shows the
+    windows of a program (app_id = desktop id, e.g. com.system76.CosmicTerm for cosmic-term).
+    Cached per XDG data directories."""
+    key = (os.environ.get("XDG_DATA_HOME", ""), os.environ.get("XDG_DATA_DIRS", ""))
+    if key not in _ALIAS_CACHE:
+        out = {}
+        for a in desktop_apps(include_hidden=True):
+            toks = exec_tokens(a["exec"])
+            if toks and os.path.basename(toks[0]) == "env":
+                toks = [t for t in toks[1:] if "=" not in t and not t.startswith("-")]
+            if not toks or os.path.basename(toks[0]) in GENERIC_NAMES:
+                continue
+            names = {a["id"].removesuffix(".desktop")} | ({a["wmclass"]} if a["wmclass"] else set())
+            out.setdefault(os.path.basename(toks[0]), set()).update(names)
+        _ALIAS_CACHE.clear()
+        _ALIAS_CACHE[key] = out
+    return _ALIAS_CACHE[key]
 
 
 def mime_of(path: str) -> str:
@@ -722,12 +838,14 @@ def player_of(cmd: list) -> tuple[str, int]:
     return (os.path.basename(cmd[0]), 1) if cmd else ("", 0)
 
 
-def apply_player_options(entries: list, popts: dict) -> list:
-    """Insert the configured start options (e.g. paused, maximised) into the commands of
-    video entries. Options already present in the command are not added twice."""
+def apply_player_options(entries: list, popts: dict, cats: set | None = None) -> list:
+    """Insert the configured start options (e.g. paused, fullscreen) into the commands of
+    the entries of the categories `cats` (default: videos). Options already present in the
+    command are not added twice."""
+    cats = {CAT_VLC} if cats is None else cats
     out = []
     for e in entries:
-        if e["category"] != CAT_VLC or not e["files"]:
+        if e["category"] not in cats or not e["files"]:
             out.append(e)
             continue
         player, at = player_of(e["cmd"])
@@ -848,6 +966,157 @@ def browser_cmd(launcher: list, argv: list) -> list:
     return launcher + keep
 
 
+# =========================================================================== browser sessions
+# Chrome-based (chrome/browser/ui/startup/startup_browser_creator.cc): with
+# --restore-last-session every profile Chrome opens at startup restores its last session
+# (pref.type = SessionStartupPref::LAST); without --profile-directory Chrome opens ALL
+# profiles that were open at the end (Local State: profile.last_active_profiles,
+# LaunchBrowserForLastProfiles). Works only when Chrome STARTS - a running (background)
+# Chrome ignores the switch. Session data is written when Chrome ends normally (SIGTERM).
+# Firefox (browser/components/sessionstore): browser.sessionstore.resume_session_once = true
+# restores the last session at the next start; Firefox resets it itself afterwards
+# (SessionStore.sys.mjs). The profile of a running Firefox is the directory of its open
+# lock file ".parentlock" (toolkit/profile/nsProfileLock.cpp).
+CHROME_DATA_DIRS = {"chrome": ".config/google-chrome", "chromium": ".config/chromium",
+                    "brave": ".config/BraveSoftware/Brave-Browser",
+                    "msedge": ".config/microsoft-edge", "vivaldi": ".config/vivaldi"}
+FIREFOX_NAMES = {"firefox", "firefox-bin", "firefox-esr", "librewolf", "librewolf-bin"}
+RESUME_PREF = "browser.sessionstore.resume_session_once"
+
+
+def chrome_data_dir(e: dict) -> Path | None:
+    udd = _opt_value(e["cmd"], "--user-data-dir")
+    if udd:
+        return Path(udd).expanduser()
+    sub = CHROME_DATA_DIRS.get(browser_family(" ".join([e["program"]] + e["cmd"][:1])))
+    return Path.home() / sub if sub else None
+
+
+def chrome_profiles(data_dir: Path | None) -> list:
+    """[(profile directory, display name)] of the profiles open at the moment (or at the end
+    of the last run), from Chrome's 'Local State'."""
+    try:
+        st = json.loads((data_dir / "Local State").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+    prof = st.get("profile", {}) if isinstance(st, dict) else {}
+    cache = prof.get("info_cache", {}) or {}
+    return [(d, (cache.get(d) or {}).get("name", d))
+            for d in prof.get("last_active_profiles", []) or []]
+
+
+def firefox_profile_dir(pid: int) -> str:
+    """Profile directory of a running Firefox: directory of its open '.parentlock'."""
+    try:
+        fds = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return ""
+    for fd in fds:
+        target = _readlink(f"/proc/{pid}/fd/{fd}")
+        if target.endswith("/.parentlock"):
+            return os.path.dirname(target)
+    return ""
+
+
+def is_firefox(e: dict) -> bool:
+    names = {e["program"], os.path.basename(e["cmd"][0]) if e["cmd"] else ""}
+    return bool(names & FIREFOX_NAMES) or e.get("flatpak") == "org.mozilla.firefox"
+
+
+def annotate_browser_sessions(entries: list) -> None:
+    """At save: remember which browser profiles are open (shown in 'show', used on
+    restore)."""
+    for e in entries:
+        if e["category"] != CAT_BROWSER or e.get("app"):
+            continue
+        if is_firefox(e):
+            d = firefox_profile_dir(e.get("pid", 0))
+            if d:
+                e["browser_profiles"] = [{"dir": d, "name": os.path.basename(d)}]
+        else:
+            profs = chrome_profiles(chrome_data_dir(e))
+            if profs:
+                e["browser_profiles"] = [{"dir": d, "name": n} for d, n in profs]
+
+
+def firefox_set_resume(profile_dir: str) -> str:
+    """Set resume_session_once in prefs.js of a profile that is NOT running (a backup of
+    prefs.js is kept). Returns '' or the reason why nothing was changed."""
+    prefs = Path(profile_dir) / "prefs.js"
+    if not Path(profile_dir).is_dir():
+        return f"Profil fehlt: {profile_dir}"
+    for d in os.listdir("/proc"):
+        if d.isdigit() and firefox_profile_dir(int(d)) == str(Path(profile_dir)):
+            return "Firefox laeuft mit diesem Profil"
+    text = prefs.read_text(encoding="utf-8", errors="surrogateescape") if prefs.exists() else ""
+    lines = [ln for ln in text.splitlines() if f'"{RESUME_PREF}"' not in ln]
+    if prefs.exists():
+        b = backup_file(prefs, f"firefox-prefs {Path(profile_dir).name}", None, ext=".js")
+        log.info("prefs.js backup: %s", b)
+    lines.append(f'user_pref("{RESUME_PREF}", true);')
+    tmp = prefs.with_name("prefs.js.session-snap-tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8", errors="surrogateescape")
+    os.replace(tmp, prefs)
+    log.info("firefox resume_session_once set: %s", profile_dir)
+    return ""
+
+
+def end_background_browser(e: dict, timeout: float = 8.0) -> bool:
+    """Chrome without any window (still running in the background) would swallow
+    --restore-last-session: end it (SIGTERM) before the restore. True if one was ended."""
+    sig = signature(e)
+    fam = browser_family(" ".join([e["program"]] + e["cmd"][:1]))
+    wins = list_windows()
+    if wins is None:               # no window list: cannot tell "background" - never end it
+        return False
+    if any(a.lower().startswith(fam + "-") or app_matches(a, window_names(e))
+           for a, _t in wins):
+        print("Chrome hat noch Fenster (z. B. ein App-Fenster wie Claude) - wird nicht "
+              "beendet; die Sitzung laesst sich dann nicht wiederherstellen")
+        return False
+    ended = False
+    for cur in build_entries(load_config(), windows=None):
+        if cur["category"] == CAT_BROWSER and not cur.get("app") and signature(cur) == sig:
+            print(f"Chrome laeuft ohne Fenster im Hintergrund (PID {cur['pid']}) - "
+                  "wird beendet, damit die Sitzung wiederhergestellt werden kann")
+            log.info("end background browser pid %d", cur["pid"])
+            _signal(cur, signal.SIGTERM)
+            end = time.monotonic() + timeout
+            while is_alive(cur["pid"], cur["start"]) and time.monotonic() < end:
+                time.sleep(0.1)
+            ended = True
+    return ended
+
+
+def prepare_browser_sessions(entries: list, dry_run: bool = False) -> list:
+    """At restore: Chrome-based -> started without --profile-directory, with
+    --restore-last-session (all last profiles with windows and tabs); Firefox -> its
+    profile gets resume_session_once. Returns the entries (browser commands adjusted)."""
+    out = []
+    for e in entries:
+        if e["category"] != CAT_BROWSER or e.get("app") or not e["cmd"]:
+            out.append(e)
+            continue
+        if is_firefox(e):
+            for prof in e.get("browser_profiles", []):
+                why = "" if dry_run else firefox_set_resume(prof["dir"])
+                print(f"Firefox-Sitzung {prof['name']}: "
+                      + (f"nicht vorbereitet - {why}" if why else "wird wiederhergestellt"))
+            out.append(e)
+            continue
+        if browser_family(" ".join([e["program"]] + e["cmd"][:1])) in BROWSER_FAMILIES:
+            cmd = [a for a in e["cmd"] if not a.startswith("--profile-directory=")]
+            if "--restore-last-session" not in cmd:
+                cmd.append("--restore-last-session")
+            names = ", ".join(p["name"] for p in e.get("browser_profiles", [])) or "zuletzt offene"
+            print(f"Chrome-Sitzung: Profile {names} mit allen Fenstern und Tabs")
+            if not dry_run:
+                end_background_browser(e)
+            e = dict(e, cmd=cmd)
+        out.append(e)
+    return out
+
+
 def _flatpak_entries(procs: dict, cfg: dict) -> list:
     """Flatpak apps, grouped by sandbox instance; restarted via `flatpak run <app-id>`."""
     entries, groups = [], {}
@@ -947,7 +1216,9 @@ def build_entries(cfg: dict, procs: dict | None = None, windows=False) -> list:
     False (= query the compositor now)."""
     procs = procs if procs is not None else scan_processes()
     entries = _flatpak_entries(procs, cfg) + _host_entries(procs, cfg, desktop_exec_names())
-    entries = add_window_files(entries, list_windows() if windows is False else windows)
+    win = list_windows() if windows is False else windows
+    entries = add_window_files(entries, win)
+    entries += app_window_entries(entries, win, procs)
     seen, out = set(), []
     for e in entries:  # de-duplicate (e.g. same image opened twice)
         key = (e["category"], tuple(e["cmd"]))
@@ -965,6 +1236,13 @@ def signature(e: dict) -> tuple:
     Others: category, program and arguments."""
     if e["category"] in (CAT_VLC, CAT_IMG) and e["files"]:
         return (e["category"], tuple(e["files"]))
+    if e["category"] == CAT_BROWSER and not e.get("app"):
+        # Chrome-based: ONE process serves all profiles; --profile-directory only says which
+        # window opened first (Chrome started through an app has it, a plain start not).
+        # Identity = browser family + user data directory.
+        fam = browser_family(" ".join([e["program"]] + e["cmd"][:1]))
+        if fam in BROWSER_FAMILIES:
+            return (e["category"], fam, _opt_value(e["cmd"], "--user-data-dir"))
     rest = tuple(e["files"]) if e["files"] else tuple(e["cmd"][1:])
     return (e["category"], e["program"], rest)
 
@@ -1007,6 +1285,47 @@ def list_snapshots() -> list:
     if not SNAP_DIR.is_dir():
         return []
     return sorted(SNAP_DIR.glob(f"{FILE_PREFIX}*.json"), key=lambda p: p.name, reverse=True)
+
+
+def archive_dir() -> Path:
+    """Archived snapshots: not offered for restore/kill, kept until deleted."""
+    return SNAP_DIR / "archiv"
+
+
+def list_archived() -> list:
+    d = archive_dir()
+    if not d.is_dir():
+        return []
+    return sorted(d.glob(f"{FILE_PREFIX}*.json"), key=lambda p: p.name, reverse=True)
+
+
+def rename_snapshot(path: Path, label: str) -> None:
+    """Set the label (shown in all lists); the file name (date/time) stays."""
+    data = load_snapshot(path)
+    old, data["label"] = data.get("label", ""), label
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8", errors="surrogateescape") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+    log.info("snapshot renamed: %s %r -> %r", path.name, old, label)
+
+
+def move_snapshot(path: Path, to_archive: bool) -> Path:
+    """Archive (to_archive=True) or bring back; never overwrites an existing file."""
+    dest_dir = archive_dir() if to_archive else SNAP_DIR
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / path.name
+    if dest.exists():
+        raise OSError(f"{dest} existiert bereits")
+    os.replace(path, dest)
+    log.info("snapshot %s: %s", "archived" if to_archive else "unarchived", path.name)
+    return dest
+
+
+def delete_snapshot(path: Path) -> None:
+    path.unlink()
+    log.info("snapshot deleted: %s", path)
 
 
 def _counts(entries) -> str:
@@ -1088,23 +1407,65 @@ def window_names(e: dict) -> set:
     names = {player_of(e["cmd"])[0], os.path.basename(e["cmd"][0]), e.get("program", "")}
     if e.get("launched_from"):
         names.add(e["launched_from"])
-    return {n for n in names if n and n not in GENERIC_NAMES and n != "flatpak"}
+    names = {n for n in names if n and n not in GENERIC_NAMES and n != "flatpak"}
+    if e.get("app"):           # web-app window: only its own app id, never the browser
+        aid = _opt_value(e["cmd"], "--app-id")
+        return {APPID_PREFIX + aid} if aid else names
+    names |= {n.removesuffix("-bin") for n in names}           # firefox-bin -> firefox
+    aliases = desktop_aliases()
+    for n in list(names):
+        names |= aliases.get(n, set())
+    if e["category"] == CAT_BROWSER and browser_family(" ".join(names)) in ("chrome",
+                                                                           "chromium"):
+        names |= {"google-chrome", "chromium", "chromium-browser"}
+    return names
+
+
+def window_mode(e: dict, maximize: set | None, fullscreen: set | None) -> str | None:
+    """MODE_FULL, MODE_MAX or None for the window of entry e; fullscreen wins."""
+    if e["category"] in (fullscreen or set()):
+        return MODE_FULL
+    if e["category"] in (maximize or set()):
+        return MODE_MAX
+    return None
+
+
+def _app_window_appears(e: dict, timeout: float) -> bool:
+    """True if the window of web-app entry e is (or becomes within `timeout`) open."""
+    aid = _opt_value(e["cmd"], "--app-id")
+    if not aid:
+        return False
+    end = time.monotonic() + timeout
+    while True:
+        wins = list_windows()
+        if wins is None:
+            return False
+        if any(aid in a for a, _t in wins):
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.5)
 
 
 def run_launches(entries: list, delay: float, dry_run: bool = False,
-                 maximize: set | None = None, max_timeout: float = 20.0) -> int:
+                 maximize: set | None = None, max_timeout: float = 20.0,
+                 fullscreen: set | None = None) -> int:
     if not dry_run and not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
         print("Warnung: weder WAYLAND_DISPLAY noch DISPLAY gesetzt "
               "- keine grafische Sitzung erkennbar.")
         if not _ask_yes("Trotzdem starten?"):
             return 1
-    to_max = [e for e in entries if e["category"] in (maximize or set())]
+    modes = {id(e): window_mode(e, maximize, fullscreen) for e in entries}
+    to_max = [e for e in entries if modes[id(e)]]
     maximizer = None
     if to_max and dry_run:
-        print(f"DRY-RUN  danach maximieren (COSMIC): {len(to_max)} Fenster")
+        n_full = sum(modes[id(e)] == MODE_FULL for e in to_max)
+        print(f"DRY-RUN  danach (COSMIC): {len(to_max) - n_full} Fenster maximieren, "
+              f"{n_full} im Vollbild")
     elif to_max:
         try:  # connect BEFORE starting, so every new window is seen
-            maximizer = WindowMaximizer()
+            maximizer = WindowMaximizer(
+                need_maximize=any(modes[id(e)] == MODE_MAX for e in to_max))
         except (WaylandError, OSError) as exc:
             print(f"Hinweis: Fenster werden nicht maximiert - {exc}")
             log.info("maximize unavailable: %s", exc)
@@ -1116,6 +1477,9 @@ def run_launches(entries: list, delay: float, dry_run: bool = False,
     log.info("look environment from %s", f"{ref[0]} pid {ref[1]}" if ref else "snapshot")
     ok = fail = 0
     started_max = []
+    restored_browser = False
+    if not dry_run:
+        busy(f"Starte {len(entries)} Programm(e) …")
     for i, e in enumerate(entries, 1):
         what = e["files"][0] if e["files"] else shlex.join(e["cmd"])
         if e.get("via"):
@@ -1125,7 +1489,15 @@ def run_launches(entries: list, delay: float, dry_run: bool = False,
         if dry_run:
             print(f"{_prefix(i, len(entries), e)} DRY-RUN  {shlex.join(e['cmd'])}")
             continue
+        if e.get("app") and restored_browser and _app_window_appears(e, 8.0):
+            print(f"{_prefix(i, len(entries), e)} OK    {what}  [von der Browser-Sitzung "
+                  "bereits geoeffnet]")
+            log.info("app window already restored by the browser session: %s", e["program"])
+            ok += 1
+            continue
         good, msg = launch(e, ref)
+        if good and "--restore-last-session" in e["cmd"]:
+            restored_browser = True
         tail = "" if good else f"  -> {msg}"
         print(f"{_prefix(i, len(entries), e)} {'OK  ' if good else 'FEHL'}  {what}{tail}")
         log.info("launch %s: %s | %s", "ok" if good else "FAILED", shlex.join(e["cmd"]), msg)
@@ -1138,14 +1510,17 @@ def run_launches(entries: list, delay: float, dry_run: bool = False,
         expected = {}
         for e in started_max:
             key = "|".join(sorted(window_names(e)))
-            expected[key] = expected.get(key, 0) + 1
+            expected.setdefault(key, []).append(modes[id(e)])
         if expected:
-            print(f"Maximiere {len(started_max)} Fenster (bis {max_timeout:.0f} s) ...")
+            busy(f"Maximiere / Vollbild: {len(started_max)} Fenster "
+                 f"(bis {max_timeout:.0f} s)")
             res = maximizer.run(expected, max_timeout)
-            for app_id, title, done in res:
-                state = "maximiert" if done else "angefordert, nicht bestaetigt"
-                print(f"            MAX      {app_id}: {title} - {state}")
-                log.info("maximize %s %r: %s", app_id, title, state)
+            for app_id, title, mode, done in res:
+                state = MODE_LABEL[mode] if done else "angefordert, nicht bestaetigt"
+                tag = "VOLL    " if mode == MODE_FULL else "MAX     "
+                print(f"            {tag} {app_id}: {title} - {state}")
+                log.info("%s %s %r: %s", "fullscreen" if mode == MODE_FULL else "maximize",
+                         app_id, title, state)
             if len(res) < len(started_max):
                 print(f"            Hinweis: {len(started_max) - len(res)} Fenster nicht "
                       "gefunden (z. B. mehrere Dateien in einem Fenster)")
@@ -1154,6 +1529,104 @@ def run_launches(entries: list, delay: float, dry_run: bool = False,
     if not dry_run:
         print(f"\nErgebnis: {ok} gestartet, {fail} fehlgeschlagen. Log: {LOG_FILE}")
     return 1 if fail else 0
+
+
+# =========================================================================== busy overlay
+# While session-snap starts, arranges or ends windows, a desktop notification stays on top
+# of all windows (COSMIC: cosmic-notifications, capabilities "actions" and "persistence";
+# expire_timeout 0 = stays until closed). Its button "Abbrechen" interrupts session-snap
+# exactly like Ctrl+C in the terminal. Talks to org.freedesktop.Notifications with gdbus
+# (GLib, part of every GTK desktop); without gdbus or a session bus nothing is shown.
+NOTIFY = ("--dest", "org.freedesktop.Notifications",
+          "--object-path", "/org/freedesktop/Notifications")
+NOTIFY_IFACE = "org.freedesktop.Notifications"
+
+
+class Overlay:
+    """with Overlay("Wiederherstellen") as ov: ov.show("Starte 5 Programme ...")"""
+
+    current = None
+
+    def __init__(self, title: str, enabled: bool = True):
+        self.title, self.id, self.mon, self.thread = title, 0, None, None
+        self.cancelled = False
+        self.enabled = bool(enabled and os.environ.get("SESSION_SNAP_OVERLAY", "1") != "0"
+                            and os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+                            and shutil.which("gdbus"))
+
+    def _call(self, method: str, *args) -> str:
+        r = subprocess.run(["gdbus", "call", "--session", *NOTIFY, "--method",
+                            f"{NOTIFY_IFACE}.{method}", *args],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode:
+            raise OSError(r.stderr.strip() or f"gdbus {method}: Fehler {r.returncode}")
+        return r.stdout
+
+    def _watch(self) -> None:
+        """reads the D-Bus signals; the button sends ActionInvoked(id, 'cancel')"""
+        for line in self.mon.stdout:
+            if ("ActionInvoked" in line and f"(uint32 {self.id}," in line
+                    and "'cancel'" in line):
+                self.cancelled = True
+                log.info("overlay: cancelled by the user")
+                os.kill(os.getpid(), signal.SIGINT)        # -> KeyboardInterrupt
+                return
+
+    def show(self, text: str) -> None:
+        if not self.enabled:
+            return
+        try:
+            if self.mon is None:
+                self.mon = subprocess.Popen(["gdbus", "monitor", "--session", *NOTIFY],
+                                            stdout=subprocess.PIPE,
+                                            stderr=subprocess.DEVNULL, text=True)
+                self.thread = threading.Thread(target=self._watch, daemon=True)
+                self.thread.start()
+            out = self._call("Notify", "session-snap", str(self.id), "system-run",
+                             f"session-snap arbeitet: {self.title}",
+                             f"{text}\nBitte nicht eingreifen.",
+                             '["cancel", "Abbrechen"]',
+                             '{"urgency": <byte 2>, "resident": <true>}', "0")
+            m = re.search(r"uint32 (\d+)", out)
+            if m:
+                self.id = int(m.group(1))
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.info("overlay unavailable: %s", exc)
+            self.close()
+            self.enabled = False
+
+    def close(self) -> None:
+        if self.id:
+            try:
+                self._call("CloseNotification", str(self.id))
+            except (OSError, subprocess.SubprocessError):
+                pass
+            self.id = 0
+        if self.mon is not None:
+            self.mon.terminate()
+            try:
+                self.mon.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.mon.kill()
+                self.mon.wait()
+            self.mon.stdout.close()
+            self.mon = None
+
+    def __enter__(self):
+        Overlay.current = self
+        return self
+
+    def __exit__(self, *exc):
+        Overlay.current = None
+        self.close()
+        return False
+
+
+def busy(text: str) -> None:
+    """Update the busy overlay (if one is open) and print the step in the terminal."""
+    print(f"… {text}", flush=True)
+    if Overlay.current is not None:
+        Overlay.current.show(text)
 
 
 # =========================================================================== terminating
@@ -1223,6 +1696,24 @@ def _signal(t: dict, sig: int) -> str:
     return "signalisiert"
 
 
+# Image programs that edit files: unsaved work possible, so no SIGKILL without asking.
+IMAGE_EDITORS = {"gimp", "gimp-2.10", "gimp-3.0", "krita", "inkscape", "darktable",
+                 "rawtherapee", "digikam", "showfoto", "shotwell", "org.gimp.GIMP",
+                 "org.kde.krita", "org.inkscape.Inkscape", "org.darktable.Darktable"}
+
+
+def force_safe(t: dict) -> bool:
+    """Players and pure image viewers hold no unsaved data: if they ignore SIGTERM they are
+    ended with SIGKILL without asking. Browsers and other programs are asked about."""
+    if t["category"] == CAT_VLC:
+        return True
+    if t["category"] == CAT_IMG:
+        names = {t["program"], os.path.basename(t["cmd"][0]) if t["cmd"] else "",
+                 t.get("flatpak", "")}
+        return not names & IMAGE_EDITORS
+    return False
+
+
 def terminate(targets: list, timeout: float, force: bool, dry_run: bool = False,
               confirm_force=None, relaunch: bool = True) -> int:
     """SIGTERM -> wait up to `timeout` -> SIGKILL only if `force` (or confirmed).
@@ -1235,6 +1726,8 @@ def terminate(targets: list, timeout: float, force: bool, dry_run: bool = False,
             for name, cmd in t.get("relaunch", []) if relaunch else []:
                 print(f"            DRY-RUN  danach neu starten: {name}: {shlex.join(cmd)}")
             continue
+        if i == 1:
+            busy(f"Beende {n} Programm(e) …")
         res = _signal(t, signal.SIGTERM)
         print(f"{_prefix(i, n, t)} SIGTERM  {what}: {res}")
         log.info("kill SIGTERM pid=%d %s: %s", t["pid"], t["program"], res)
@@ -1242,15 +1735,27 @@ def terminate(targets: list, timeout: float, force: bool, dry_run: bool = False,
         return 0
     deadline = time.monotonic() + timeout
     alive = [t for t in targets if is_alive(t["pid"], t["start"])]
+    if alive:
+        busy(f"Warte bis zu {timeout:.0f} s auf {len(alive)} Programm(e) …")
     while alive and time.monotonic() < deadline:
         time.sleep(0.1)
         alive = [t for t in alive if is_alive(t["pid"], t["start"])]
-    if alive and not force and confirm_force is not None:
-        names = ", ".join(f"{t['program']} ({t['pid']})" for t in alive)
-        force = confirm_force(f"{len(alive)} Prozess(e) reagieren nicht: {names}. "
+    auto = [] if force else [t for t in alive if force_safe(t)]
+    for t in auto:
+        res = _signal(t, signal.SIGKILL)
+        print(f"            SIGKILL  {t['program']} (PID {t['pid']}): {res} "
+              "(Player/Bildbetrachter, keine ungespeicherten Daten)")
+        log.info("kill SIGKILL (auto) pid=%d %s: %s", t["pid"], t["program"], res)
+    if auto:
+        time.sleep(0.5)
+        alive = [t for t in alive if is_alive(t["pid"], t["start"])]
+    rest = [t for t in alive if t not in auto]
+    if rest and not force and confirm_force is not None:
+        names = ", ".join(f"{t['program']} ({t['pid']})" for t in rest)
+        force = confirm_force(f"{len(rest)} Prozess(e) reagieren nicht: {names}. "
                               "Mit SIGKILL hart beenden?")
-    if alive and force:
-        for t in alive:
+    if rest and force:
+        for t in rest:
             res = _signal(t, signal.SIGKILL)
             print(f"            SIGKILL  {t['program']} (PID {t['pid']}): {res}")
             log.info("kill SIGKILL pid=%d %s: %s", t["pid"], t["program"], res)
@@ -1283,6 +1788,9 @@ def _relaunch_apps(ended: list) -> int:
 # do not carry PIDs: windows are matched by app_id and by appearing after the launch.
 WL_INFO, WL_MANAGER = "zcosmic_toplevel_info_v1", "zcosmic_toplevel_manager_v1"
 STATE_MAXIMIZED, CAP_MAXIMIZE = 0, 3
+# set_fullscreen(toplevel, output|null) = request 7; state 3 = fullscreen. cosmic-comp
+# (commit 742b800b) executes the request but does not announce a capability for it.
+STATE_FULLSCREEN = 3
 
 
 class WaylandError(Exception):
@@ -1424,6 +1932,10 @@ def app_matches(app_id: str, names: set) -> bool:
     a = app_id.lower().removesuffix(".desktop")
     a_parts = set(a.split(".")) - _ID_NOISE
     for n in names:
+        if n.startswith(APPID_PREFIX):         # web-app window "<browser>-<app id>-<profile>"
+            if n[len(APPID_PREFIX):].lower() in a:
+                return True
+            continue
         n = n.lower().removesuffix(".desktop")
         if not n:
             continue
@@ -1437,11 +1949,15 @@ _ID_NOISE = {"org", "com", "io", "net", "de", "github", "gitlab", "gnome", "kde"
              "desktop", "freedesktop", "system76", ""}
 
 
-class WindowMaximizer:
-    """Connect BEFORE the programs are started; afterwards maximize every NEW window whose
-    app_id belongs to the started programs (COSMIC only)."""
+MODE_MAX, MODE_FULL = "max", "full"
+MODE_LABEL = {MODE_MAX: "maximiert", MODE_FULL: "Vollbild"}
 
-    def __init__(self):
+
+class WindowMaximizer:
+    """Connect BEFORE the programs are started; afterwards maximize or fullscreen every NEW
+    window whose app_id belongs to the started programs (COSMIC only)."""
+
+    def __init__(self, need_maximize: bool = True):
         self.wl = _Wl()
         self.wl.roundtrip()
         missing = [i for i in (WL_INFO, WL_MANAGER) if i not in self.wl.globals]
@@ -1453,7 +1969,9 @@ class WindowMaximizer:
         self.manager = self.wl.bind(WL_MANAGER, 1)
         self.wl.roundtrip()
         self.wl.roundtrip()
-        if CAP_MAXIMIZE not in self.wl.caps:
+        # fullscreen is not announced as a capability (see STATE_FULLSCREEN), so only the
+        # maximize capability can be checked
+        if need_maximize and CAP_MAXIMIZE not in self.wl.caps:
             self.wl.close()
             raise WaylandError("Compositor erlaubt kein Maximieren (Capability fehlt)")
         self.old = set(self.wl.handles)
@@ -1461,12 +1979,23 @@ class WindowMaximizer:
     def close(self) -> None:
         self.wl.close()
 
+    def _request(self, hid: int, mode: str) -> None:
+        if mode == MODE_FULL:
+            if STATE_FULLSCREEN not in self.wl.handles[hid]["states"]:
+                self.wl._send(self.manager, 7, ("u", hid), ("u", 0))  # set_fullscreen(, null)
+        elif STATE_MAXIMIZED not in self.wl.handles[hid]["states"]:
+            self.wl._send(self.manager, 3, ("u", hid))                 # set_maximized
+
     def run(self, expected: dict, timeout: float, settle: float = 6.0) -> list:
-        """expected: '|'-joined program names -> number of windows. Waits until all expected
-        windows are maximized, `timeout` is reached, or no new window appeared for `settle`
-        seconds. Returns [(app_id, title, confirmed)]."""
-        names = {n for key in expected for n in key.split("|")}
-        want = sum(expected.values())
+        """expected: '|'-joined program names -> number of windows (maximize) or list of
+        modes (MODE_MAX / MODE_FULL, one per window). Waits until all expected windows are
+        handled, `timeout` is reached, or no new window appeared for `settle` seconds.
+        Returns [(app_id, title, confirmed)] for maximize-only calls with numbers, else
+        [(app_id, title, mode, confirmed)]."""
+        legacy = all(isinstance(v, int) for v in expected.values())
+        todo = {k: ([MODE_MAX] * v if isinstance(v, int) else list(v))
+                for k, v in expected.items()}
+        want = sum(len(v) for v in todo.values())
         done, start = {}, time.monotonic()
         last = start
         while len(done) < want:
@@ -1475,17 +2004,25 @@ class WindowMaximizer:
                 break
             self.wl.wait(0.2)
             for hid, h in self.wl.handles.items():
-                if (hid in self.old or hid in done or not h["done"] or h["closed"]
-                        or not app_matches(h["app_id"], names)):
+                if hid in self.old or hid in done or not h["done"] or h["closed"]:
                     continue
-                if STATE_MAXIMIZED not in h["states"]:
-                    self.wl._send(self.manager, 3, ("u", hid))    # set_maximized
-                done[hid] = h
+                key = next((k for k, modes in todo.items()
+                            if modes and app_matches(h["app_id"], set(k.split("|")))), None)
+                if key is None:
+                    continue
+                mode = todo[key].pop(0)
+                self._request(hid, mode)
+                done[hid] = mode
                 last = time.monotonic()
         self.wl.wait(0.5)
         self.wl.roundtrip()
-        result = [(h["app_id"], h["title"], STATE_MAXIMIZED in h["states"])
-                  for hid, h in done.items()]
+        state = {MODE_MAX: STATE_MAXIMIZED, MODE_FULL: STATE_FULLSCREEN}
+        result = []
+        for hid, mode in done.items():
+            h = self.wl.handles[hid]
+            ok = state[mode] in h["states"]
+            result.append((h["app_id"], h["title"], ok) if legacy
+                          else (h["app_id"], h["title"], mode, ok))
         self.wl.close()
         return result
 
@@ -1497,7 +2034,7 @@ class WindowMaximizer:
 # full paths via the directories the process watches (inotify), the GTK list of recently
 # used files and the directories of the files already known.
 _TITLE_SEP = re.compile(r"\s+[-–—|]\s+")
-_TITLE_COUNTER = re.compile(r"\s*[\(\[]\d+\s*/\s*\d+[\)\]]\s*$")
+_TITLE_COUNTER = re.compile(r"\s*[\(\[]\d+\s*/\s*\d+[\)\]]")
 
 
 def list_windows() -> list | None:
@@ -1522,7 +2059,8 @@ def list_windows() -> list | None:
 
 def title_candidates(title: str) -> list:
     """File names a window title may contain: 'Foto 2.png', 'Foto 2.png - nomacs',
-    '*Foto 2.png (2/5)' ... -> ['Foto 2.png', ...]."""
+    '*Foto 2.png (2/5)', 'Foto 2.png (2/5) - Bildbetrachter' ... -> ['Foto 2.png', ...].
+    The counter "(n/m)" is removed wherever it stands, before names with "/" are dropped."""
     t = _TITLE_COUNTER.sub("", title.strip()).lstrip("*").strip()
     out = [t] + [x.strip() for x in _TITLE_SEP.split(t)]
     return [x for x in _uniq(out) if x and "/" not in x]
@@ -1862,8 +2400,12 @@ def install_watcher(start: bool = True) -> list:
     else:
         out.append(f"{f}: Autostart-Eintrag vorhanden - unveraendert")
     if start:
-        restart_watcher()
-        out.append("session-snap watch: gestartet")
+        if restart_watcher():
+            out.append("session-snap watch: gestartet")
+        else:
+            still = " (ein bereits laufender Mitschreiber laeuft unveraendert weiter)" \
+                if watcher_alive() else ""
+            out.append(f"session-snap watch: NICHT gestartet - {watcher_start_problem()}{still}")
     return out
 
 
@@ -1881,11 +2423,25 @@ def stop_watcher(timeout: float = 3.0) -> bool:
     return True
 
 
-def restart_watcher() -> None:
-    """(Re)start the watcher detached from this terminal - with the installed program."""
+def watcher_start_problem() -> str:
+    """Why the watcher cannot be started now ('' = it can)."""
+    if not PROGRAM.is_file():
+        return f"Programm {PROGRAM} nicht installiert"
+    if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+        return ("keine grafische Sitzung (WAYLAND_DISPLAY/DISPLAY fehlt); "
+                "er startet bei der naechsten Anmeldung ueber den Autostart")
+    return ""
+
+
+def restart_watcher() -> bool:
+    """(Re)start the watcher detached from this terminal - with the installed program.
+    Returns True if it was started, False if not (see watcher_start_problem()); in that
+    case a running watcher is left alone."""
+    if watcher_start_problem():
+        return False
     stop_watcher()
-    if PROGRAM.is_file() and (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
-        spawn_detached([str(PROGRAM), "watch"], str(Path.home()))
+    spawn_detached([str(PROGRAM), "watch"], str(Path.home()))
+    return True
 
 
 def _match_windows(entries: list, windows: list) -> dict:
@@ -2310,8 +2866,11 @@ def install_version(prog: Path, tests: list) -> None:
         print(f"Testprogramm {v} nicht im Download-Ordner - Testprogramm unveraendert")
     log.info("update: installed %s from %s", v, prog)
     if watcher_alive():
-        restart_watcher()
-        print("Mitschreiber mit der neuen Version neu gestartet.")
+        if restart_watcher():
+            print("Mitschreiber mit der neuen Version neu gestartet.")
+        else:
+            print("Mitschreiber NICHT neu gestartet, laeuft mit der alten Version weiter - "
+                  f"{watcher_start_problem()}")
 
 
 def auto_update(argv: list, ask=_ask, execv=os.execv) -> None:
@@ -2373,6 +2932,8 @@ _ESC_SEQ = {
     "[5~": curses.KEY_PPAGE, "[6~": curses.KEY_NPAGE, "[H": curses.KEY_HOME,
     "[F": curses.KEY_END, "OH": curses.KEY_HOME, "OF": curses.KEY_END,
     "[1~": curses.KEY_HOME, "[4~": curses.KEY_END,
+    "[C": curses.KEY_RIGHT, "[D": curses.KEY_LEFT, "OC": curses.KEY_RIGHT,
+    "OD": curses.KEY_LEFT,
 }
 
 
@@ -2505,10 +3066,14 @@ def _render_row(row, w, is_cur, entries, sel, running):
 
 
 def checklist(title: str, entries: list, preselect: list,
-              running: set | None = None) -> list | None:
-    """Multi selection with [x] boxes. Returns the selected entries or None (abort)."""
+              running: set | None = None, foldable: bool = False) -> list | None:
+    """Multi selection with [x] boxes. Returns the selected entries or None (abort).
+    foldable=True: categories can be folded (start folded) and selected as a whole,
+    see checklist_folding()."""
     if not entries:
         return []
+    if foldable:
+        return checklist_folding(title, entries, preselect, running)
     running = running or set()
     rows = []  # ("hdr", category, count) | ("item", index)
     for cat in CAT_ORDER:
@@ -2597,13 +3162,193 @@ def checklist(title: str, entries: list, preselect: list,
     return curses.wrapper(ui)
 
 
+def _fold_header(cat, count, entries, sel, is_cur, expanded, w):
+    """One line for a category header of the folding checklist (cat None = root 'Alle')."""
+    idx = [i for i, e in enumerate(entries) if cat is None or e["category"] == cat]
+    n_sel = sum(sel[i] for i in idx)
+    box = "[x]" if n_sel == len(idx) else ("[-]" if n_sel else "[ ]")
+    names = {}
+    for i in idx:
+        names[entries[i]["program"]] = names.get(entries[i]["program"], 0) + 1
+    summary = ", ".join(f"{n} ×{c}" if c > 1 else n for n, c in names.items())
+    arrow = "▾" if expanded else "▸"
+    label = "Alle Programme" if cat is None else CAT_LABEL[cat]
+    text = f"{arrow} {box} {label} ({n_sel}/{count} gewaehlt)"
+    if cat is not None and not expanded and summary:
+        text += f"  – {summary}"
+    attr = _cp(1) | curses.A_BOLD
+    if is_cur:
+        attr = curses.A_REVERSE | curses.A_BOLD
+    return [(text, attr)]
+
+
+FOLD_LEGEND = (
+    ("↑↓ bewegen   → aufklappen   ← zuklappen   Leertaste an/aus "
+     "(auf Kategorie oder \"Alle\": ganze Gruppe)   Enter OK   q/Esc Abbruch",
+     "↑↓ bewegen  → auf  ← zu  Leertaste an/aus  Enter OK  q Abbruch"),
+    ("Kurztasten:  a alle an   n alle ab   i Auswahl umkehren   "
+     "z alle Kategorien auf/zu",
+     "a alle an  n alle ab  i umkehren  z alle auf/zu"),
+)
+
+
+def checklist_folding(title: str, entries: list, preselect: list,
+                      running: set | None = None) -> list | None:
+    """Checklist as a tree: root "Alle Programme" -> categories -> programs. Categories
+    start folded (overview first); a single category starts unfolded.
+    Up / Down move, Right unfolds, Left folds (on the root: all categories), Space selects /
+    deselects (on a category or the root: the whole group). Short keys: a all on, n all
+    off, i invert, z unfold / fold all. Enter = OK, q / Esc = abort. A two-line legend at
+    the bottom explains the keys."""
+    running = running or set()
+    cats = [c for c in CAT_ORDER if any(e["category"] == c for e in entries)]
+    count = {c: sum(e["category"] == c for e in entries) for c in cats}
+    expanded = set(cats) if len(cats) == 1 else set()
+    sel = list(preselect)
+    ROOT = ("root",)
+
+    def visible():
+        out = [ROOT]
+        for c in cats:
+            out.append(("hdr", c, count[c]))
+            if c in expanded:
+                out += [("item", i) for i, e in enumerate(entries) if e["category"] == c]
+        return out
+
+    def group(row):
+        """entry indices covered by a row"""
+        if row == ROOT:
+            return list(range(len(entries)))
+        if row[0] == "hdr":
+            return [i for i, e in enumerate(entries) if e["category"] == row[1]]
+        return [row[1]]
+
+    def toggle_all():
+        if expanded:
+            expanded.clear()
+        else:
+            expanded.update(cats)
+
+    def ui(scr):
+        _ui_setup(scr)
+        cur_row, top = ROOT, 0
+        while True:
+            rows = visible()
+            cur = rows.index(cur_row) if cur_row in rows else 0
+            cur_row = rows[cur]
+            scr.erase()
+            h, w = scr.getmaxyx()
+            _title(scr, title, w)
+            body_top, body_h = 2, h - 5             # two legend lines at the bottom
+            if body_h < 4 or w < 40:
+                _put(scr, 2, 0, "Terminal zu klein (mind. 40x9).")
+                if _getkey(scr) in (ord("q"), 27):
+                    return None
+                continue
+            rendered = []
+            for j, r in enumerate(rows):
+                if r == ROOT:
+                    rendered.append(_fold_header(None, len(entries), entries, sel, j == cur,
+                                                 len(expanded) == len(cats), w))
+                elif r[0] == "hdr":
+                    rendered.append(_fold_header(r[1], r[2], entries, sel, j == cur,
+                                                 r[1] in expanded, w))
+                else:
+                    rendered.append(_render_row(r, w, j == cur, entries, sel, running))
+            heights = [len(x) for x in rendered]
+            top = min(top, cur)
+            while top < cur and sum(heights[top:cur + 1]) > body_h:
+                top += 1
+            y = body_top
+            for r in range(top, len(rows)):
+                x = 1 if rows[r] == ROOT else (3 if rows[r][0] == "hdr" else 5)
+                for text, attr in rendered[r]:
+                    if y >= body_top + body_h:
+                        break
+                    _put(scr, y, x, text.ljust(w - x - 1), attr)   # full width: no rests
+                    y += 1
+            if top > 0:
+                _put(scr, 1, w - 12, " ▲ mehr ", curses.A_DIM)
+            if y >= body_top + body_h and top + 1 < len(rows):
+                _put(scr, h - 3, w - 12, " ▼ mehr ", curses.A_DIM)
+            counter = f" {sum(sel)}/{len(sel)} gewaehlt │ "
+            for n, (long_, short) in enumerate(FOLD_LEGEND):
+                lead = counter if n == 0 else " " * len(counter)
+                text = long_ if len(lead) + len(long_) < w else short
+                _put(scr, h - 2 + n, 0, lead + text, curses.A_DIM)
+            k = _getkey(scr)
+            last = len(rows) - 1
+            if k == curses.KEY_UP:
+                cur_row = rows[max(0, cur - 1)]
+            elif k == curses.KEY_DOWN:
+                cur_row = rows[min(last, cur + 1)]
+            elif k == curses.KEY_PPAGE:
+                cur_row = rows[max(0, cur - max(1, body_h // 3))]
+            elif k == curses.KEY_NPAGE:
+                cur_row = rows[min(last, cur + max(1, body_h // 3))]
+            elif k == curses.KEY_HOME:
+                cur_row = rows[0]
+            elif k == curses.KEY_END:
+                cur_row = rows[last]
+            elif k == curses.KEY_RIGHT:
+                if cur_row == ROOT:
+                    expanded.update(cats)
+                else:
+                    expanded.add(cur_row[1] if cur_row[0] == "hdr"
+                                 else entries[cur_row[1]]["category"])
+            elif k == curses.KEY_LEFT:
+                if cur_row == ROOT:
+                    expanded.clear()
+                else:
+                    cat = (cur_row[1] if cur_row[0] == "hdr"
+                           else entries[cur_row[1]]["category"])
+                    expanded.discard(cat)
+                    cur_row = ("hdr", cat, count[cat])
+            elif k == ord(" "):
+                idx = group(cur_row)
+                new = not all(sel[i] for i in idx)
+                for i in idx:
+                    sel[i] = new
+                if cur_row[0] == "item":
+                    cur_row = rows[min(last, cur + 1)]
+            elif k == ord("a"):
+                sel[:] = [True] * len(sel)
+            elif k == ord("n"):
+                sel[:] = [False] * len(sel)
+            elif k == ord("i"):
+                sel[:] = [not s for s in sel]
+            elif k == ord("z"):
+                toggle_all()
+                if cur_row[0] == "item":
+                    cat = entries[cur_row[1]]["category"]
+                    cur_row = ("hdr", cat, count[cat])
+            elif k in (10, 13, curses.KEY_ENTER):
+                return [e for i, e in enumerate(entries) if sel[i]]
+            elif k in (ord("q"), 27):
+                return None
+    return curses.wrapper(ui)
+
+def scope_count(n: int, total: int | None) -> str:
+    """'(5)' or, with total (restore): '(5 von 16 – 11 laufen bereits)'."""
+    if total is None:
+        return f"({n})"
+    running = total - n
+    return f"({n} von {total}" + (f" – {running} laufen bereits)" if running else ")")
+
+
 def choose_scope(title: str, verb: str, items: list, info: list,
-                 extra: str | None = None):
+                 extra: str | None = None, total: list | None = None):
     """Menu: all / checklist / one category / [extra] / cancel.
+    total (restore): all snapshot entries - the counts then show "n von m" and how many
+    of them are already running.
     Returns a list of entries, "checklist", "extra" or None (cancel)."""
     by = {c: [e for e in items if e["category"] == c] for c in CAT_ORDER}
-    opts = [f"Alle {verb} ({len(items)})", "Auswahl treffen … (Checkliste)"]
-    opts += [f"Nur {CAT_SHORT[c]} ({len(by[c])})" for c in CAT_ORDER]
+    tot = None if total is None else {c: sum(e["category"] == c for e in total)
+                                      for c in CAT_ORDER}
+    opts = [f"Alle {verb} {scope_count(len(items), None if total is None else len(total))}",
+            "Auswahl treffen … (Checkliste)"]
+    opts += [f"Nur {CAT_SHORT[c]} {scope_count(len(by[c]), None if tot is None else tot[c])}"
+             for c in CAT_ORDER]
     if extra:
         opts.append(extra)
     opts.append("Abbrechen")
@@ -2707,6 +3452,7 @@ def cmd_save(cfg, label: str | None, interactive: bool, kill_after: bool = False
         entries = chosen
         if label is None:
             label = input("Optionale Bezeichnung (Enter = keine): ").strip()
+    annotate_browser_sessions(entries)
     source = assign_order(entries)
     if source:
         n = sum(1 for e in entries if "order" in e)
@@ -2726,8 +3472,9 @@ def cmd_save(cfg, label: str | None, interactive: bool, kill_after: bool = False
         print("Nicht beendet.")
         return 0
     confirm = _ask_yes if interactive else None
-    return terminate(targets, cfg["kill_timeout"], force, confirm_force=confirm,
-                     relaunch=relaunch)
+    with Overlay("Beenden", cfg["overlay"]):
+        return terminate(targets, cfg["kill_timeout"], force, confirm_force=confirm,
+                         relaunch=relaunch)
 
 
 def _order_label(data: dict) -> str:
@@ -2756,6 +3503,7 @@ def _apply_order(entries: list, timeout: float, dry_run: bool) -> None:
     if dry_run:
         print(f"DRY-RUN  danach Alt-Tab-Reihenfolge wie beim Speichern: {n} Fenster")
         return
+    busy(f"Alt-Tab-Reihenfolge: {n} Fenster ordnen")
     try:
         done = reorder_windows(entries, timeout)
     except (WaylandError, OSError) as exc:
@@ -2764,6 +3512,31 @@ def _apply_order(entries: list, timeout: float, dry_run: bool) -> None:
         return
     print(f"Alt-Tab-Reihenfolge wie beim Speichern: {len(done)} von {n} Fenstern geordnet")
     log.info("reordered %d of %d windows", len(done), n)
+
+
+def _window_modes_info(cfg, enabled: bool = True) -> str:
+    """'Vollbild: Bilder; maximiert: Videos' (fullscreen wins over maximize)."""
+    full = cfg["fullscreen"] if enabled else set()
+    mx = (cfg["maximize"] - full) if enabled else set()
+
+    def names(cats):
+        return ", ".join(CAT_SHORT[c] for c in CAT_ORDER if c in cats) or "nichts"
+    return f"Vollbild: {names(full)}; maximiert: {names(mx)}"
+
+
+def running_signatures(cfg) -> set:
+    """Signatures of the entries that run now. A browser counts only if it has an open
+    window: Chrome keeps running in the background without any window ("continue running
+    background apps"), restoring must then still open it. Without a window list (no COSMIC)
+    every process counts."""
+    windows = list_windows()
+    out = set()
+    for e in build_entries(cfg, windows=windows):
+        if (e["category"] == CAT_BROWSER and windows is not None
+                and not any(app_matches(a, window_names(e)) for a, _t in windows)):
+            continue
+        out.add(signature(e))
+    return out
 
 
 def cmd_restore(cfg, spec: str | None, start_all: bool, dry_run: bool,
@@ -2777,7 +3550,7 @@ def cmd_restore(cfg, spec: str | None, start_all: bool, dry_run: bool,
     if not entries:
         print("Snapshot ist leer.")
         return 0
-    running = {signature(e) for e in build_entries(cfg)}
+    running = running_signatures(cfg)
     pending = [e for e in entries if signature(e) not in running]
     if start_all:
         chosen = pending
@@ -2792,17 +3565,17 @@ def cmd_restore(cfg, spec: str | None, start_all: bool, dry_run: bool,
                     f"Programme: {labels}",
                     "Videos starten " + ("pausiert (--play: sofort abspielen)"
                                          if player_opts else "sofort (--play)")
-                    + "; maximiert: " + (", ".join(sorted(
-                        CAT_SHORT[c] for c in cfg["maximize"])) if maximize and
-                        cfg["maximize"] else "nichts")]
+                    + "; " + _window_modes_info(cfg, maximize)]
             chosen = choose_scope("Wiederherstellen", "starten", pending, info,
-                                  extra="Programme fuer Videos/Bilder waehlen …")
+                                  extra="Programme fuer Videos/Bilder waehlen …",
+                                  total=entries)
             if chosen != "extra":
                 break
             choose_programs(entries)
         if chosen == "checklist":
             pre = [signature(e) not in running for e in entries]
-            chosen = checklist(f"Starten – {path.name}", entries, pre, running)
+            chosen = checklist(f"Starten – {path.name}", entries, pre, running,
+                               foldable=True)
         if chosen is None:
             print("Abgebrochen.")
             return 1
@@ -2817,17 +3590,27 @@ def cmd_restore(cfg, spec: str | None, start_all: bool, dry_run: bool,
     chosen, warnings = apply_programs(chosen, progs)
     if player_opts:
         chosen = apply_player_options(chosen, cfg["player_options"])
+    if cfg["browser_session"]:
+        chosen = prepare_browser_sessions(chosen, dry_run)
+    if maximize and CAT_IMG in cfg["fullscreen"]:   # e.g. eog --fullscreen (own mode)
+        chosen = apply_player_options(chosen, cfg["player_options"], {CAT_IMG})
     for w in warnings:
         print(f"Warnung: {w}")
     if mode == "saved":   # start in the recorded order, too (helps even without COSMIC)
         chosen = sorted(chosen, key=lambda e: e.get("order", -1))
+    # a browser restoring its session must START first - an app window started before it
+    # would start the browser process, which then ignores --restore-last-session
+    chosen = ([e for e in chosen if "--restore-last-session" in e["cmd"]]
+              + [e for e in chosen if "--restore-last-session" not in e["cmd"]])
     log.info("restore from %s: %d entries%s", path, len(chosen), " (dry-run)" if dry_run else "")
-    rc = run_launches(chosen, cfg["delay"], dry_run,
-                      cfg["maximize"] if maximize else set(), cfg["maximize_timeout"])
-    if mode == "saved":
-        sigs = {signature(c) for c in chosen}
-        _apply_order(chosen + [e for e in entries if signature(e) not in sigs],
-                     cfg["maximize_timeout"], dry_run)
+    with Overlay("Wiederherstellen", cfg["overlay"] and not dry_run):
+        rc = run_launches(chosen, cfg["delay"], dry_run,
+                          cfg["maximize"] if maximize else set(), cfg["maximize_timeout"],
+                          cfg["fullscreen"] if maximize else set())
+        if mode == "saved":
+            sigs = {signature(c) for c in chosen}
+            _apply_order(chosen + [e for e in entries if signature(e) not in sigs],
+                         cfg["maximize_timeout"], dry_run)
     return rc
 
 
@@ -2857,7 +3640,8 @@ def cmd_kill(cfg, spec: str | None, kill_all: bool, force: bool, timeout: float 
             info.append(f"App-Fenster, die danach neu gestartet werden: {', '.join(apps)}")
         chosen = choose_scope("Beenden", "beenden", targets, info)
         if chosen == "checklist":
-            chosen = checklist(f"Beenden – {path.name}", targets, [True] * len(targets))
+            chosen = checklist(f"Beenden – {path.name}", targets, [True] * len(targets),
+                               foldable=True)
         if chosen is None:
             print("Abgebrochen.")
             return 1
@@ -2868,7 +3652,9 @@ def cmd_kill(cfg, spec: str | None, kill_all: bool, force: bool, timeout: float 
     log.info("kill from %s: %d processes%s", path, len(targets), " (dry-run)" if dry_run else "")
     confirm = _ask_yes if sys.stdin.isatty() and not kill_all else None
     wait = cfg["kill_timeout"] if timeout is None else timeout
-    return terminate(targets, wait, force, dry_run, confirm_force=confirm, relaunch=relaunch)
+    with Overlay("Beenden", cfg["overlay"] and not dry_run):
+        return terminate(targets, wait, force, dry_run, confirm_force=confirm,
+                         relaunch=relaunch)
 
 
 def cmd_list() -> int:
@@ -2880,6 +3666,46 @@ def cmd_list() -> int:
     for s in snaps:
         print(f"  {s.name:<40} {snapshot_title(s)}")
     return 0
+
+
+def cmd_manage(ask=None, read=None) -> int:
+    """Interactive: rename, archive, bring back and delete snapshots."""
+    ask = ask or _ask_yes
+    read = read or input
+    archived = False
+    while True:
+        snaps = list_archived() if archived else list_snapshots()
+        where = "Archiv" if archived else "Snapshots"
+        opts = [snapshot_title(s) for s in snaps]
+        switch = ("→ Zurueck zu den Snapshots" if archived
+                  else f"→ Archiv anzeigen ({len(list_archived())})")
+        idx = menu(f"Snapshots verwalten – {where}", opts + [switch, "Fertig"],
+                   info=[f"{len(snaps)} in {archive_dir() if archived else SNAP_DIR}",
+                         "Snapshot waehlen, dann: umbenennen, archivieren, loeschen"])
+        if idx is None or idx == len(opts) + 1:
+            return 0
+        if idx == len(opts):
+            archived = not archived
+            continue
+        path = snaps[idx]
+        acts = (["Umbenennen", "Aus dem Archiv zurueckholen", "Loeschen", "Zurueck"] if archived
+                else ["Umbenennen", "Archivieren", "Loeschen", "Zurueck"])
+        act = menu(f"{path.name}", acts, info=[snapshot_title(path)])
+        if act is None or act == 3:
+            continue
+        try:
+            if act == 0:
+                label = read("Neue Bezeichnung (Enter = keine): ").strip()
+                rename_snapshot(path, label)
+                print(f"Umbenannt: {path.name}  «{label}»")
+            elif act == 1:
+                dest = move_snapshot(path, not archived)
+                print(f"{'Zurueckgeholt' if archived else 'Archiviert'}: {dest}")
+            elif act == 2 and ask(f"{path.name} endgueltig loeschen?"):
+                delete_snapshot(path)
+                print(f"Geloescht: {path.name}")
+        except (OSError, json.JSONDecodeError, EOFError) as exc:
+            print(f"Fehler: {exc}")
 
 
 def cmd_show(spec: str | None) -> int:
@@ -3049,10 +3875,14 @@ def interactive(cfg) -> int:
                     "Protokollierte Programme beenden (kill)",
                     "Snapshot-Inhalt anzeigen",
                     "Programme fuer Videos/Bilder waehlen",
+                    "Snapshots verwalten (umbenennen, archivieren, loeschen)",
                     "Beenden"],
                    info=[f"Ablage: {BASE_DIR}"])
-        if idx is None or idx == 5:
+        if idx is None or idx == 6:
             return 0
+        if idx == 5:
+            cmd_manage()
+            continue
         if idx == 0:
             cmd_save(cfg, None, True)
         elif idx == 1:
@@ -3110,7 +3940,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--play", action="store_true",
                    help="Videos sofort abspielen (keine Startoptionen wie --pause)")
     r.add_argument("--no-maximize", action="store_true",
-                   help="Fenster nach dem Start nicht maximieren")
+                   help="Fenster nach dem Start weder maximieren noch auf Vollbild schalten")
     r.add_argument("--order", choices=("saved", "keep"),
                    help="Alt-Tab-Reihenfolge: saved = wie beim Speichern, keep = nicht aendern")
     k = sub.add_parser("kill", help="laufende Programme eines Snapshots beenden")
@@ -3123,6 +3953,7 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--no-relaunch", action="store_true",
                    help="App-Fenster (z. B. Claude) danach NICHT neu starten")
     sub.add_parser("list", help="Snapshots auflisten")
+    sub.add_parser("manage", help="Snapshots umbenennen, archivieren, loeschen")
     sh = sub.add_parser("show", help="Snapshot-Inhalt ausgeben")
     sh.add_argument("snapshot", nargs="?", help="Dateiname, Pfad oder 'latest'")
     sub.add_parser("config", help="Konfigurationsvorlage anlegen")
@@ -3184,6 +4015,8 @@ def main(argv: list | None = None) -> int:
         if a.cmd == "kill":
             return cmd_kill(cfg, a.snapshot, a.all, a.force, a.timeout, a.dry_run,
                             not a.no_relaunch)
+        if a.cmd == "manage":
+            return cmd_manage()
         if a.cmd == "programs":
             return cmd_programs(a.video, a.image, a.reset)
         if a.cmd == "diagnose":

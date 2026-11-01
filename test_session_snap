@@ -38,7 +38,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import quote
 
-VERSION = "1.7.0"  # must equal VERSION of the program it tests (used by --install/--update)
+VERSION = "1.7.9"  # must equal VERSION of the program it tests (used by --install/--update)
 HERE = Path(__file__).resolve().parent
 _DEFAULT = HERE / "session-snap" if (HERE / "session-snap").is_file() else HERE / "session-snap.py"
 SCRIPT = Path(os.environ.get("SESSION_SNAP_SCRIPT", _DEFAULT))
@@ -55,6 +55,7 @@ def _load_module():
 
 
 ss = _load_module()
+os.environ["SESSION_SNAP_OVERLAY"] = "0"   # no desktop notifications while testing (T59: own)
 
 SLEEP = "import time\ntime.sleep(120)\n"
 # dummies hold the file named by their first argument (as a restored player does) or by $F
@@ -115,9 +116,9 @@ class Base(unittest.TestCase):
         (cls.store / "config.ini").write_text(
             "[session-snap]\ndelay = 0\nkill_timeout = 3\nvideo_players = fakeplayer\n"
             "image_viewers = fakeviewer\n"
-            # dummies are Python interpreters: no player options for "vlc"; "-B" is a
+            # dummies are Python interpreters: no player options for "vlc"/"eog"; "-B" is a
             # harmless Python flag used to observe the insertion for "fakeplayer"
-            "[player-options]\nvlc =\nfakeplayer = -B\n")
+            "[player-options]\nvlc =\neog =\nfakeplayer = -B\n")
         cls._env_backup = dict(os.environ)
         os.environ.update({"XDG_DATA_HOME": str(cls.tmp / "data"),
                            "XDG_DATA_DIRS": str(cls.tmp / "sys"),
@@ -210,8 +211,8 @@ class Base(unittest.TestCase):
     def isolated(self):
         """Restrict build_entries to the dummies - real desktop programs stay untouched."""
         orig = ss.build_entries
-        with mock.patch.object(ss, "build_entries", lambda cfg, procs=None:
-                               self.mine(orig(cfg, procs))):
+        with mock.patch.object(ss, "build_entries", lambda cfg, procs=None, windows=False:
+                               self.mine(orig(cfg, procs, windows))):
             yield
 
     def run_main(self, *argv) -> tuple[int, str]:
@@ -288,6 +289,121 @@ class T1_Unit(Base):
         with mock.patch.object(ss, "CONFIG_FILE", cfgf), \
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(ss.load_config()["delay"], 0.4)
+
+    def test_57_restore_menu_counts(self):
+        """restore menu: 'n von m' per category plus how many are already running;
+        kill menu (no total): plain count"""
+        self.assertEqual(ss.scope_count(0, 16), "(0 von 16 – 16 laufen bereits)")
+        self.assertEqual(ss.scope_count(3, 3), "(3 von 3)")
+        self.assertEqual(ss.scope_count(0, 0), "(0 von 0)")
+        self.assertEqual(ss.scope_count(4, None), "(4)")
+        total = [{"category": "image"}] * 9 + [{"category": "browser"}] * 3
+        pending = [{"category": "image"}] * 2
+        seen = {}
+        with mock.patch.object(ss, "menu", lambda t, opts, info: seen.setdefault("o", opts)
+                               and None):
+            ss.choose_scope("W", "starten", pending, [], total=total)
+        self.assertEqual(seen["o"][0], "Alle starten (2 von 12 – 10 laufen bereits)")
+        self.assertIn("Nur Bilder (2 von 9 – 7 laufen bereits)", seen["o"])
+        self.assertIn("Nur Videos (0 von 0)", seen["o"])
+        with mock.patch.object(ss, "menu", lambda t, opts, info: seen.update(k=opts)):
+            ss.choose_scope("B", "beenden", pending, [])
+        self.assertEqual(seen["k"][0], "Alle beenden (2)")
+
+    def test_58_eog_fullscreen_option(self):
+        """images in 'fullscreen': eog is started with its own --fullscreen; videos are not
+        touched by the image call, images not by the video call"""
+        self.assertEqual(ss.DEFAULT_PLAYER_OPTIONS["eog"], ["--fullscreen"])
+        img = {"category": "image", "program": "eog", "files": ["/b/a.png"],
+               "cmd": ["/usr/bin/eog", "/b/a.png"]}
+        vid = {"category": "vlc", "program": "vlc", "files": ["/v.mkv"],
+               "cmd": ["/usr/bin/vlc", "/v.mkv"]}
+        out = ss.apply_player_options([img, vid], ss.DEFAULT_PLAYER_OPTIONS, {"image"})
+        self.assertEqual(out[0]["cmd"], ["/usr/bin/eog", "--fullscreen", "/b/a.png"])
+        self.assertEqual(out[1]["cmd"], vid["cmd"])
+        out = ss.apply_player_options([img], ss.DEFAULT_PLAYER_OPTIONS)
+        self.assertEqual(out[0]["cmd"], img["cmd"])
+        again = ss.apply_player_options(
+            [dict(img, cmd=["/usr/bin/eog", "--fullscreen", "/b/a.png"])],
+            ss.DEFAULT_PLAYER_OPTIONS, {"image"})
+        self.assertEqual(again[0]["cmd"].count("--fullscreen"), 1)
+        self.assertIn("eog = --fullscreen", ss.CONFIG_TEMPLATE)
+        nom = dict(img, program="nomacs", cmd=["/usr/bin/nomacs", "/b/a.png"])
+        out = ss.apply_player_options([nom], ss.DEFAULT_PLAYER_OPTIONS, {"image"})
+        self.assertEqual(out[0]["cmd"], ["/usr/bin/nomacs", "--fullscreen", "/b/a.png"])
+        cv = dict(img, program="cosmic-viewer", cmd=["/usr/bin/cosmic-viewer", "/b/a.png"])
+        out = ss.apply_player_options([cv], ss.DEFAULT_PLAYER_OPTIONS, {"image"})
+        self.assertEqual(out[0]["cmd"], cv["cmd"])                 # no option: path only
+
+    def test_59_overlay_notification_and_cancel(self):
+        """busy overlay: Notify with button 'Abbrechen' (critical, never expires), text
+        updates replace the same notification, close removes it; the button interrupts
+        session-snap like Ctrl+C. Without gdbus / session bus: silently nothing."""
+        fake = self.tmp / "fakebin"
+        fake.mkdir(exist_ok=True)
+        calls = self.tmp / "gdbus-calls.txt"
+        (fake / "gdbus").write_text(
+            f"#!{sys.executable}\nimport os, sys, time\n"
+            f"open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "if sys.argv[1] == 'monitor':\n"
+            "    if os.environ.get('FAKE_CANCEL'):\n"
+            "        time.sleep(0.5)\n"
+            "        print('/org/freedesktop/Notifications: org.freedesktop.Notifications."
+            "ActionInvoked (uint32 7, \\'cancel\\')', flush=True)\n"
+            "    time.sleep(30)\n"
+            "elif 'Notify' in ' '.join(sys.argv):\n"
+            "    print('(uint32 7,)')\n")
+        os.chmod(fake / "gdbus", 0o755)
+        env = {"PATH": f"{fake}:{os.environ['PATH']}", "SESSION_SNAP_OVERLAY": "1",
+               "DBUS_SESSION_BUS_ADDRESS": "unix:path=/nonexistent"}
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()):
+            with ss.Overlay("Test") as ov:
+                ss.busy("Schritt 1")
+                ss.busy("Schritt 2")
+            self.assertIsNone(ss.Overlay.current)
+            log = calls.read_text()
+            self.assertEqual(log.count("Notifications.Notify"), 2)
+            self.assertIn("session-snap 0 ", log)            # first: new notification
+            self.assertIn("session-snap 7 ", log)            # update replaces id 7
+            self.assertIn('["cancel", "Abbrechen"]', log)
+            self.assertIn("<byte 2>", log)
+            self.assertIn("CloseNotification 7", log)
+            del ov
+            with mock.patch.dict(os.environ, {"FAKE_CANCEL": "1"}):
+                with self.assertRaises(KeyboardInterrupt):
+                    with ss.Overlay("Test") as ov:
+                        ss.busy("lange Arbeit")
+                        time.sleep(5)
+                self.assertTrue(ov.cancelled)
+        with mock.patch.dict(os.environ, {"SESSION_SNAP_OVERLAY": "1",
+                                          "DBUS_SESSION_BUS_ADDRESS": ""}):
+            self.assertFalse(ss.Overlay("x").enabled)
+
+    def test_63_manage_snapshots(self):
+        """rename keeps the file name and sets the label; archive hides a snapshot from the
+        lists (restore/kill), bringing it back shows it again; delete only after 'ja';
+        the interactive menu drives the same functions"""
+        a = ss.save_snapshot([], "alt")
+        time.sleep(1.1)
+        b = ss.save_snapshot([], "neu")
+        ss.rename_snapshot(a, "Feierabend Freitag")
+        self.assertEqual(ss.load_snapshot(a)["label"], "Feierabend Freitag")
+        self.assertIn("«Feierabend Freitag»", ss.snapshot_title(a))
+        arch = ss.move_snapshot(a, True)
+        self.assertEqual(ss.list_snapshots(), [b])
+        self.assertEqual(ss.list_archived(), [arch])
+        back = ss.move_snapshot(arch, False)
+        self.assertEqual(back, a)
+        self.assertEqual(ss.list_archived(), [])
+        # interactive: choose b (index 0), "Loeschen" (2): first refused, then confirmed
+        picks = iter([0, 2, 0, 2, None])
+        answers = iter([False, True])
+        with mock.patch.object(ss, "menu", lambda *x, **k: next(picks)), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            ss.cmd_manage(ask=lambda q: next(answers))
+        self.assertIn("Geloescht", out.getvalue())
+        self.assertEqual(ss.list_snapshots(), [a])
+        ss.delete_snapshot(a)
 
     def test_07_key_decoding(self):
         """_getkey(): ESC[B and ESC O B -> down, ESC[6~ -> PgDn, lone Esc -> 27, junk -> -1"""
@@ -446,7 +562,9 @@ class T3_Restore(Base):
         self.assertEqual(self._dummy_pids(), [])
 
     def test_18_checklist_via_pty(self):
-        """interactive: menu '2', n, Down(ESC[B), Down(ESC O B), Up, Space, Enter -> 1 start"""
+        """interactive restore, 'Auswahl treffen' (same tree as kill): n = all off, Down to
+        Videos (ESC[B), Right unfolds (long path shown completely), Down x2 (ESC O B, ESC[B)
+        to Bilder, Right, Down to a.png, Space, Enter -> only a.png is started"""
         self._snapshot_and_stop()
         env = dict(os.environ, TERM="xterm-256color")
         pid, fd = pty.fork()
@@ -469,7 +587,8 @@ class T3_Restore(Base):
 
         self.assertIn("Auswahl treffen", read(3))
         screen = ""
-        for key in (b"2", b"n", b"\x1b[B", b"\x1bOB", b"\x1bOA", b" ", b"\r"):
+        for key in (b"2", b"n", b"\x1b[B", b"\x1b[C", b"\x1bOB", b"\x1b[B", b"\x1b[C",
+                    b"\x1b[B", b" ", b"\r"):
             os.write(fd, key)
             screen += read(0.6)
         screen += read(2)
@@ -503,10 +622,12 @@ class T4_Kill(Base):
         self.assertEqual(len(self._dummy_pids()), 3)
 
     def test_21_kill_unresponsive(self):
-        """SIGTERM ignored: without --force exit 1 and alive; with --force SIGKILL ends it"""
-        self.spawn("vlc", IGNORE_TERM, hold=self.film)
-        self.wait_for(lambda: [e["files"] for e in self.entries()] == [[str(self.film)]],
-                      msg="stubborn vlc holding the film")
+        """SIGTERM ignored by a normal program: without --force exit 1 and alive; with
+        --force SIGKILL ends it. A player ignoring SIGTERM is ended with SIGKILL without
+        --force and without a question (no unsaved data)."""
+        self.spawn("fakeapp", IGNORE_TERM, hold=self.film)
+        self.wait_for(lambda: [e["program"] for e in self.entries()] == ["fakeapp"],
+                      msg="stubborn fakeapp")
         time.sleep(0.3)  # let the dummy install its SIGTERM handler
         self._snapshot(self.entries())
         rc, out = self.run_main("kill", "-s", "latest", "--all", "--timeout", "0.5")
@@ -517,6 +638,18 @@ class T4_Kill(Base):
         self.assertEqual(rc, 0, out)
         self.assertIn("SIGKILL", out)
         self.wait_for(lambda: self._dummy_pids() == [], msg="killed")
+        self.spawn("vlc", IGNORE_TERM, hold=self.film)
+        self.wait_for(lambda: [e["files"] for e in self.entries()] == [[str(self.film)]],
+                      msg="stubborn vlc holding the film")
+        time.sleep(0.3)
+        self._snapshot(self.entries())
+        asked = []
+        with mock.patch.object(ss, "_ask_yes", lambda q: asked.append(q) or False):
+            rc, out = self.run_main("kill", "-s", "latest", "--all", "--timeout", "0.5")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("keine ungespeicherten Daten", out)
+        self.assertEqual(asked, [])
+        self.wait_for(lambda: self._dummy_pids() == [], msg="vlc killed")
 
     def test_22_kill_protects_own_chain(self):
         """a process in the caller's own process chain is reported, never signalled"""
@@ -554,6 +687,56 @@ class T4_Kill(Base):
         want = {ss.signature(e) for e in es}
         self.wait_for(lambda: want == {ss.signature(e) for e in self.entries()},
                       msg="cycle restored")
+
+
+    def test_56_kill_checklist_folded_categories(self):
+        """interactive kill, 'Auswahl treffen': tree with root 'Alle Programme', categories
+        folded (overview with program names), legend at the bottom; Space on the root
+        deselects everything, Space on a category selects the whole category, Right
+        unfolds it; Enter -> only the selected category is terminated"""
+        es = self.start_standard_set()
+        self._snapshot(es)
+        keep = sorted(e["pid"] for e in es if e["category"] != "image")
+        env = dict(os.environ, TERM="xterm-256color")
+        pid, fd = pty.fork()
+        if pid == 0:  # child
+            os.execvpe(sys.executable, [sys.executable, str(SCRIPT), "kill", "-s", "latest"],
+                       env)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 160, 0, 0))
+
+        def read(t):
+            data, end = b"", time.monotonic() + t
+            while time.monotonic() < end:
+                r, _, _ = select.select([fd], [], [], 0.05)
+                if r:
+                    try:
+                        data += os.read(fd, 65536)
+                    except OSError:
+                        break
+            return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Z0-9]|\x1b[=>]", "",
+                          data.decode("utf-8", "replace"))
+
+        self.assertIn("Auswahl treffen", read(4))
+        os.write(fd, b"2")
+        folded = read(1)
+        self.assertIn("Alle Programme (3/3 gewaehlt)", folded)
+        self.assertIn("Videos (1/1 gewaehlt)", folded)
+        self.assertIn("Bilder (1/1 gewaehlt)", folded)
+        self.assertIn("Kurztasten:", folded)                # legend line 2
+        self.assertNotIn("a.png", folded)                   # folded: no file lines yet
+        # (curses redraws only changed characters afterwards: outcome is checked instead)
+        for key in (b" ",            # root: all off
+                    b"\x1b[B", b"\x1b[B",                   # down to header Bilder
+                    b" ",            # whole category Bilder on
+                    b"\x1b[C"):      # unfold Bilder
+            os.write(fd, key)
+            screen = read(0.5)
+        self.assertIn("a.png", screen)
+        os.write(fd, b"\r")
+        screen = read(6)
+        os.waitpid(pid, 0)
+        self.assertIn("1 beendet", screen)
+        self.wait_for(lambda: sorted(self._dummy_pids()) == keep, msg="only eog ended")
 
 
 class T6_Browser_Programs(Base):
@@ -599,6 +782,133 @@ class T6_Browser_Programs(Base):
         rc, out = self.run_main("kill", "-s", "latest", "--all", "--no-relaunch")
         self.assertNotIn("neu gestartet", out)
         self.wait_for(lambda: self._dummy_pids() == [], msg="all ended")
+
+    def test_60_app_window_found_through_window_list(self):
+        """Claude opened in an ALREADY running Chrome: the process has no --app-id, the app
+        is found through its window 'chrome-<id>-Default'; kill starts it again"""
+        self.spawn("chrome", ONE, "--profile-directory=Default")
+        self.wait_for(lambda: len(self.entries()) == 1, msg="chrome")
+        wins = [("chrome-abc123-Default", "Claude"), ("google-chrome", "Neuer Tab")]
+        with mock.patch.object(ss, "list_windows", return_value=wins):
+            es = self.entries()
+            self.assertEqual(sorted(e["program"] for e in es), ["Claude", "chrome"])
+            app = next(e for e in es if e.get("app"))
+            self.assertIn("--app-id=abc123", app["cmd"])
+            ss.save_snapshot([e for e in es if not e.get("app")], "nur chrome")
+            rc, out = self.run_main("kill", "-s", "latest", "--all")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Claude: neu gestartet", out)
+        self.wait_for(lambda: len(self._dummy_pids()) == 1, msg="relaunched app")
+
+    def test_61_window_names_for_order(self):
+        """Alt-Tab order: windows are found under their desktop ID (fake.desktop for
+        fakeapp), without '-bin' (firefox-bin -> firefox), as google-chrome for chrome, and
+        web apps only under their app id"""
+        es = [{"category": "rest", "program": "fakeapp", "files": [],
+               "cmd": [str(self.bin / "fakeapp")]},
+              {"category": "browser", "program": "firefox-bin", "files": [],
+               "cmd": ["/usr/lib/firefox/firefox-bin"]},
+              {"category": "browser", "program": "chrome", "files": [],
+               "cmd": ["/opt/google/chrome/chrome"]},
+              {"category": "browser", "program": "WhatsApp", "files": [], "app": True,
+               "cmd": ["/opt/google/chrome/chrome", "--app-id=hnpf"]}]
+        wins = [("chrome-hnpf-Default", "WhatsApp"), ("google-chrome", "Tab"),
+                ("firefox", "Mozilla Firefox"), ("fake", "Fake")]
+        self.assertEqual(ss._match_windows(es, wins), {0: 3, 1: 2, 2: 1, 3: 0})
+
+    def test_62_background_browser_not_running(self):
+        """a browser process WITHOUT window (Chrome in the background) does not count as
+        running for restore; with its window it does"""
+        self.spawn("chrome", ONE, "--profile-directory=Default")
+        self.wait_for(lambda: len(self.entries()) == 1, msg="chrome")
+        sig = ss.signature(self.entries()[0])
+        with self.isolated():
+            with mock.patch.object(ss, "list_windows", return_value=[("firefox", "x")]):
+                self.assertNotIn(sig, ss.running_signatures(self.cfg))
+            with mock.patch.object(ss, "list_windows", return_value=[("google-chrome", "T")]):
+                self.assertIn(sig, ss.running_signatures(self.cfg))
+            with mock.patch.object(ss, "list_windows", return_value=None):
+                self.assertIn(sig, ss.running_signatures(self.cfg))
+
+    def test_64_chrome_identity_ignores_profile_flag(self):
+        """snapshot taken while Chrome ran as plain 'chrome'; now Chrome was started through
+        an app (--profile-directory=Default --app-id=...): kill must still end it (with the
+        app windows inside). A different --user-data-dir is a different Chrome."""
+        plain = {"category": "browser", "program": "chrome", "files": [],
+                 "cmd": [str(self.bin / "chrome")]}
+        viaapp = dict(plain, cmd=[str(self.bin / "chrome"), "--profile-directory=Default"])
+        other = dict(plain, cmd=[str(self.bin / "chrome"), "--user-data-dir=/x/claude"])
+        self.assertEqual(ss.signature(plain), ss.signature(viaapp))
+        self.assertNotEqual(ss.signature(plain), ss.signature(other))
+        self.spawn("chrome", ONE, "--profile-directory=Default", "--app-id=abc123")
+        self.wait_for(lambda: len(self.entries()) == 2, msg="chrome + app")
+        ss.save_snapshot([plain], "chrome ohne Optionen")
+        rc, out = self.run_main("kill", "-s", "latest", "--all", "--no-relaunch")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("1 beendet", out)
+        self.wait_for(lambda: self._dummy_pids() == [], msg="chrome ended")
+
+    def test_65_chrome_session_restore(self):
+        """save remembers the open Chrome profiles (Local State); restore starts Chrome
+        without --profile-directory and with --restore-last-session, before app windows;
+        an app window the session already opened is not started a second time"""
+        data = self.tmp / "chrome-data"
+        data.mkdir(exist_ok=True)
+        (data / "Local State").write_text(json.dumps({"profile": {
+            "last_active_profiles": ["Default", "Profile 1"],
+            "info_cache": {"Default": {"name": "Lorem"}, "Profile 1": {"name": "Ipsum"}}}}))
+        self.assertEqual(ss.chrome_profiles(data), [("Default", "Lorem"),
+                                                    ("Profile 1", "Ipsum")])
+        br = {"category": "browser", "program": "chrome", "files": [], "pid": 0,
+              "cmd": [str(self.bin / "chrome"), f"--user-data-dir={data}",
+                      "--profile-directory=Default"]}
+        ss.annotate_browser_sessions([br])
+        self.assertEqual([p["name"] for p in br["browser_profiles"]], ["Lorem", "Ipsum"])
+        with mock.patch.object(ss, "end_background_browser", return_value=False), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            res = ss.prepare_browser_sessions([br])
+        self.assertEqual(res[0]["cmd"], [str(self.bin / "chrome"), f"--user-data-dir={data}",
+                                         "--restore-last-session"])
+        self.assertIn("Lorem, Ipsum", out.getvalue())
+        # app window already opened by the session: not launched again
+        app = {"category": "browser", "program": "Claude", "files": [], "app": True,
+               "cmd": [str(self.bin / "chrome"), "--app-id=abc123"], "cwd": ""}
+        started = []
+        with mock.patch.object(ss, "launch", lambda e, ref=False: started.append(e["program"])
+                               or (True, "gestartet")), \
+                mock.patch.object(ss, "list_windows",
+                                  return_value=[("chrome-abc123-Default", "Claude")]), \
+                mock.patch.object(ss, "session_look_env", return_value=None), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            ss.run_launches([res[0], app], 0)
+        self.assertEqual(started, ["chrome"])
+        self.assertIn("von der Browser-Sitzung bereits geoeffnet", out.getvalue())
+
+    def test_66_firefox_session_restore(self):
+        """the profile of a running Firefox is found through its open .parentlock; while it
+        runs prefs.js is not touched; afterwards resume_session_once is set once (old value
+        replaced, other prefs kept, backup of prefs.js)"""
+        prof = self.tmp / "ff-profile.default"
+        prof.mkdir(exist_ok=True)
+        (prof / ".parentlock").write_text("")
+        (prof / "prefs.js").write_text('user_pref("a.b", 1);\n'
+                                       f'user_pref("{ss.RESUME_PREF}", false);\n')
+        p = self.spawn("firefox", HOLD_F, hold=prof / ".parentlock")
+        self.wait_for(lambda: ss.firefox_profile_dir(p.pid) == str(prof), msg="lock open")
+        self.assertIn("laeuft", ss.firefox_set_resume(str(prof)))
+        self._kill_all_dummies()
+        self.assertEqual(ss.firefox_set_resume(str(prof)), "")
+        text = (prof / "prefs.js").read_text()
+        self.assertIn('user_pref("a.b", 1);', text)
+        self.assertEqual(text.count(ss.RESUME_PREF), 1)
+        self.assertIn(f'user_pref("{ss.RESUME_PREF}", true);', text)
+        self.assertTrue(any(b.name.startswith("firefox-prefs ff-profile.default")
+                            for b in ss.BACKUP_DIR.iterdir()))
+        e = {"category": "browser", "program": "firefox", "files": [], "cmd": ["firefox"],
+             "browser_profiles": [{"dir": str(prof), "name": "default"}]}
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            ss.prepare_browser_sessions([e])
+        self.assertIn("Firefox-Sitzung default: wird wiederhergestellt", out.getvalue())
 
     def test_31_programs_cli(self):
         """programs: lists installed handlers per type, saves and resets the choice"""
@@ -746,8 +1056,10 @@ class T7_Exact_Program(Base):
 class FakeCosmic:
     """Tiny Wayland server speaking the wire protocol of wl_display/wl_registry and of
     zcosmic_toplevel_info_v1 (v1) / zcosmic_toplevel_manager_v1 as defined in the
-    cosmic-protocols XML files. Windows are added with add_window(); set_maximized requests
-    are recorded and answered with a state event containing 0 (maximized)."""
+    cosmic-protocols XML files. Windows are added with add_window(); set_maximized and
+    set_fullscreen(toplevel, null) requests are recorded and answered with a state event
+    containing 0 (maximized) or 3 (fullscreen). Like cosmic-comp, fullscreen is executed
+    without being announced as a capability."""
 
     def __init__(self, path, caps=(1, 2, 3, 4)):
         self.path, self.caps = path, caps
@@ -755,6 +1067,7 @@ class FakeCosmic:
         self.srv.bind(path)
         self.srv.listen(4)
         self.conns, self.windows, self.maximized, self.activated = [], [], [], []
+        self.fullscreen = []
         self.lock = threading.Lock()
         self.stop = False
         self.t = threading.Thread(target=self._accept, daemon=True)
@@ -872,6 +1185,13 @@ class FakeCosmic:
                     if win is not None:
                         self.maximized.append(win["app_id"])
                         self._send(st, self._msg(hid, 8, struct.pack("=II", 4, 0))
+                                   + self._msg(hid, 1))
+                elif typ == "zcosmic_toplevel_manager_v1" and op == 7:   # set_fullscreen
+                    hid, output = struct.unpack_from("=II", p)
+                    win = st["handles"].get(hid)
+                    if win is not None and output == 0:
+                        self.fullscreen.append(win["app_id"])
+                        self._send(st, self._msg(hid, 8, struct.pack("=II", 4, 3))
                                    + self._msg(hid, 1))
 
     def close(self):
@@ -1009,6 +1329,44 @@ class T8_Maximize(unittest.TestCase):
             with self.assertRaises(ss.WaylandError):
                 ss.WindowMaximizer()
 
+    def test_53_fullscreen_images_maximize_videos(self):
+        """defaults: images fullscreen, videos maximized; 'fullscreen' wins over 'maximize';
+        set_fullscreen (request 7, output null) works without an announced capability"""
+        cfgf = self.dir / "cfg.ini"
+        cfgf.write_text("[session-snap]\nmaximize = videos, images\n")
+        with mock.patch.object(ss, "CONFIG_FILE", cfgf):
+            c = ss.load_config()
+        self.assertEqual(c["fullscreen"], {"image"})
+        self.assertEqual(c["maximize"], {"vlc", "image"})
+        img = {"category": "image"}
+        vid = {"category": "vlc"}
+        self.assertEqual(ss.window_mode(img, c["maximize"], c["fullscreen"]), ss.MODE_FULL)
+        self.assertEqual(ss.window_mode(vid, c["maximize"], c["fullscreen"]), ss.MODE_MAX)
+        self.assertIsNone(ss.window_mode({"category": "rest"}, c["maximize"], c["fullscreen"]))
+        self.assertEqual(ss._window_modes_info(c), "Vollbild: Bilder; maximiert: Videos")
+        srv = FakeCosmic(str(self.dir / "wayland-fake"), caps=(1, 2))   # no maximize cap
+        try:
+            m = ss.WindowMaximizer(need_maximize=False)
+            srv.add_window("eog", "Foto 1.png - Bildbetrachter")
+            res = m.run({"eog": [ss.MODE_FULL]}, timeout=5)
+        finally:
+            srv.close()
+        self.assertEqual(srv.fullscreen, ["eog"])
+        self.assertEqual(srv.maximized, [])
+        self.assertEqual([(a, mode, ok) for a, _t, mode, ok in res],
+                         [("eog", ss.MODE_FULL, True)])
+        srv = FakeCosmic(str(self.dir / "wayland-fake2"))
+        with mock.patch.dict(os.environ, {"WAYLAND_DISPLAY": "wayland-fake2"}):
+            try:
+                m = ss.WindowMaximizer()
+                srv.add_window("vlc", "A.mkv - VLC media player")
+                srv.add_window("eog", "B.png - Bildbetrachter")
+                res = m.run({"vlc": [ss.MODE_MAX], "eog": [ss.MODE_FULL]}, timeout=5)
+            finally:
+                srv.close()
+        self.assertEqual((srv.maximized, srv.fullscreen), (["vlc"], ["eog"]))
+        self.assertTrue(all(ok for *_x, ok in res))
+
 
 XBEL = """<?xml version="1.0" encoding="UTF-8"?>
 <xbel version="1.0" xmlns:bookmark="http://www.freedesktop.org/standards/desktop-bookmarks"
@@ -1057,6 +1415,14 @@ class T9_Single_Instance(Base):
         self.assertEqual([x[0] for x in r], [str(f2), str(f1)])
         self.assertEqual(r[0][1], {"nomacs"})
         self.assertEqual(r[1][1], {"eog"})
+
+    def test_55_title_counter_in_the_middle(self):
+        """Fehler #21: a counter '(n/m)' in the middle of the title is removed before names
+        containing '/' are dropped - the file name survives"""
+        c = ss.title_candidates("Foto 2.png (2/5) - Bildbetrachter")
+        self.assertEqual(c[:2], ["Foto 2.png - Bildbetrachter", "Foto 2.png"])
+        self.assertIn("Bildbetrachter", c)
+        self.assertEqual(ss.title_candidates("Bild [3/12] — Loupe")[1], "Bild")
 
     def test_43_merge_window_files(self):
         """add_window_files: one entry per window; closed window drops its file; two
@@ -1179,13 +1545,17 @@ class T9_Single_Instance(Base):
         self.assertIn("Desktop-Sitzung (Vorlage fuer Darstellung): cosmic-panel", out)
 
     def test_45_vlc_default_options(self):
-        """VLC gets its own window per file: --no-one-instance-when-started-from-file"""
+        """VLC gets its own window per file (--no-one-instance-when-started-from-file) and
+        repeats the video inside the same input (--input-repeat), started paused"""
         self.assertIn("--no-one-instance-when-started-from-file",
                       ss.DEFAULT_PLAYER_OPTIONS["vlc"])
+        self.assertIn("--input-repeat=65535", ss.DEFAULT_PLAYER_OPTIONS["vlc"])
+        self.assertIn("vlc = --start-paused --input-repeat=65535", ss.CONFIG_TEMPLATE)
         e = {"category": "vlc", "program": "vlc", "files": ["/v.mkv"],
              "cmd": ["/usr/bin/vlc", "--started-from-file", "/v.mkv"]}
         out = ss.apply_player_options([e], ss.DEFAULT_PLAYER_OPTIONS)
         self.assertEqual(out[0]["cmd"], ["/usr/bin/vlc", "--start-paused",
+                                         "--input-repeat=65535",
                                          "--no-one-instance-when-started-from-file",
                                          "--started-from-file", "/v.mkv"])
 
@@ -1263,6 +1633,19 @@ class T10_Install_Update(unittest.TestCase):
         self.assertEqual(r.stdout.strip().split(":").count(str(sc)), 1, r.stdout)
         rc, out = self.run_prog(prog, "list")
         self.assertIn("session-snap_2026-10-28_17-27-30.json", out)
+
+    def test_54_watch_not_started_without_session(self):
+        """Fehler #20: without a graphical session --install and watch --start say that the
+        watcher was NOT started (and why) instead of claiming 'gestartet'"""
+        dl_prog = self.dl / "session-snap.py"
+        shutil.copy2(SCRIPT, dl_prog)
+        rc, out = self.run_prog(dl_prog, "--install")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("session-snap watch: NICHT gestartet - keine grafische Sitzung", out)
+        self.assertNotIn("session-snap watch: gestartet", out)
+        rc, out = self.run_prog(self.home / "scripts" / "session-snap", "watch", "--start")
+        self.assertIn("NICHT gestartet", out)
+        self.assertNotIn("session-snap watch: gestartet", out)
 
     def test_47_update_list_and_downgrade(self):
         """--update: newest first, installed version marked, test program of the same
