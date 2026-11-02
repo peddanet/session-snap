@@ -51,7 +51,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 import xml.etree.ElementTree as ET
 
-VERSION = "1.7.10"
+VERSION = "1.7.11"
 FILE_PREFIX = "session-snap_"
 
 # --------------------------------------------------------------------------- paths
@@ -2841,6 +2841,8 @@ def cmd_install() -> int:
             print(f"  {_install_file(newest, TESTPROG, 'test_session_snap')}")
     elif not (TESTPROG.exists() and static_version(TESTPROG) == VERSION):
         print(f"  Testprogramm {VERSION} nicht gefunden - uebersprungen")
+    for line in install_docs(VERSION, [me.parent]):
+        print(f"  {line}")
     for rc in (Path.home() / ".profile", Path.home() / ".bashrc"):
         print(f"  {add_path_block(rc)}")
     for line in install_watcher(start=True):
@@ -2857,6 +2859,104 @@ def _ask(question: str) -> bool:
         return False
 
 
+# Documentation of the same version is installed too: ~/scripts/session-snap.d/docs/.
+# The version is read without running anything: Markdown from its line 'title: "session-snap
+# X..."', PDF from the Title of its document information (Pandoc/XeLaTeX write it, in a
+# compressed object stream, as UTF-16 hex string).
+DOC_NAMES = ("session-snap-documentation", "session-snap-primer")
+_DOC_RE = re.compile(r"^(session-snap-(?:documentation|primer))(?: ?\(\d+\))?\.(md|pdf)$")
+_DOC_VER = re.compile(r"session-snap ([0-9][0-9A-Za-z.\-]*)")
+
+
+def docs_dir() -> Path:
+    return BASE_DIR / "docs"
+
+
+def _pdf_title(path: Path) -> str:
+    import zlib
+    data = path.read_bytes()
+    blobs = [data]
+    for m in re.finditer(rb"stream\r?\n", data):
+        end = data.find(b"endstream", m.end())
+        try:
+            blobs.append(zlib.decompress(data[m.end():end]))
+        except zlib.error:
+            pass
+    for b in blobs:
+        for m in re.finditer(rb"/Producer|/Creator", b):
+            t = re.search(rb"/Title\s*(<[0-9A-Fa-f]+>|\((?:[^()\\]|\\.)*\))",
+                          b[max(0, m.start() - 600):m.start() + 600])
+            if not t:
+                continue
+            raw = t.group(1)
+            if raw.startswith(b"<"):
+                h = bytes.fromhex(raw[1:-1].decode())
+                return h[2:].decode("utf-16-be", "replace") if h[:2] == b"\xfe\xff" \
+                    else h.decode("latin-1")
+            return raw[1:-1].decode("latin-1")
+    return ""
+
+
+def doc_version(path: Path) -> str | None:
+    """Version a documentation file describes (Markdown title line or PDF title)."""
+    try:
+        if path.suffix == ".md":
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                head = fh.read(4096)
+            m = re.search(r'^title:\s*"([^"]*)"', head, re.M)
+            text = m.group(1) if m else ""
+        else:
+            text = _pdf_title(path)
+    except OSError:
+        return None
+    m = _DOC_VER.search(text)
+    return m.group(1) if m else None
+
+
+def install_docs(version: str, extra_dirs: list | None = None) -> list:
+    """Copy documentation and primer (.md and .pdf) of `version` from the download folders
+    (and extra_dirs) to docs/. An older installed copy is backed up first. Returns messages;
+    a missing file is named, so that it can be generated or downloaded."""
+    found = {}
+    for d in list(extra_dirs or []) + download_dirs():
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for n in names:
+            m = _DOC_RE.match(n)
+            p = Path(d) / n
+            if not m or not p.is_file() or doc_version(p) != version:
+                continue
+            key = (m.group(1), m.group(2))
+            if key not in found or p.stat().st_mtime > found[key].stat().st_mtime:
+                found[key] = p
+    out = []
+    docs_dir().mkdir(parents=True, exist_ok=True)
+    for name in DOC_NAMES:
+        for ext in ("md", "pdf"):
+            dest = docs_dir() / f"{name}.{ext}"
+            src = found.get((name, ext))
+            if src is None:
+                have = doc_version(dest) if dest.exists() else None
+                if have == version:
+                    out.append(f"{dest.name} {version}: bereits installiert")
+                else:
+                    out.append(f"{name}.{ext} zu Version {version} NICHT gefunden - bitte "
+                               "erzeugen bzw. herunterladen" + (f" (installiert: {have})"
+                                                                 if have else ""))
+                continue
+            if dest.exists() and _same(src, dest):
+                out.append(f"{dest.name} {version}: unveraendert")
+                continue
+            if dest.exists():
+                backup_file(dest, name, doc_version(dest), ext="." + ext)
+            shutil.copy2(src, dest)
+            out.append(f"{dest.name} {version}: installiert nach {docs_dir()}")
+            log.info("docs: installed %s %s from %s", name + "." + ext, version, src)
+    return out
+
+
 def install_version(prog: Path, tests: list) -> None:
     """Install program file `prog` and the test program of the same version (if found)."""
     v = static_version(prog)
@@ -2866,6 +2966,8 @@ def install_version(prog: Path, tests: list) -> None:
         print(_install_file(match[0], TESTPROG, "test_session_snap"))
     else:
         print(f"Testprogramm {v} nicht im Download-Ordner - Testprogramm unveraendert")
+    for line in install_docs(v, [prog.parent]):
+        print(line)
     log.info("update: installed %s from %s", v, prog)
     if watcher_alive():
         if restart_watcher():

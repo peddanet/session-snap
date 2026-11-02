@@ -38,7 +38,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import quote
 
-VERSION = "1.7.10"  # must equal VERSION of the program it tests (used by --install/--update)
+VERSION = "1.7.11"  # must equal VERSION of the program it tests (used by --install/--update)
 HERE = Path(__file__).resolve().parent
 _DEFAULT = HERE / "session-snap" if (HERE / "session-snap").is_file() else HERE / "session-snap.py"
 SCRIPT = Path(os.environ.get("SESSION_SNAP_SCRIPT", _DEFAULT))
@@ -404,6 +404,39 @@ class T1_Unit(Base):
         self.assertIn("Geloescht", out.getvalue())
         self.assertEqual(ss.list_snapshots(), [a])
         ss.delete_snapshot(a)
+
+    def test_67_install_docs_of_same_version(self):
+        """documentation and primer (.md, .pdf) of the installed version are copied to docs/;
+        the version is read from the Markdown title and from the PDF title (compressed, UTF-16);
+        other versions are ignored; a missing file is reported"""
+        import zlib
+        dl = self.tmp / "dl-docs"
+        dl.mkdir(exist_ok=True)
+
+        def pdf(path, title):
+            info = (b"<< /Title <" + ("\ufeff" + title).encode("utf-16-be").hex().encode()
+                    + b"> /Producer (xdvipdfmx) >>")
+            z = zlib.compress(info)
+            path.write_bytes(b"%PDF-1.5\n1 0 obj\n<< /Length " + str(len(z)).encode()
+                             + b" /Filter /FlateDecode >>\nstream\n" + z
+                             + b"\nendstream\nendobj\n%%EOF\n")
+        (dl / "session-snap-documentation (3).md").write_text('---\ntitle: "session-snap 9.1.0"\n')
+        (dl / "session-snap-documentation.md").write_text('---\ntitle: "session-snap 9.0.0"\n')
+        pdf(dl / "session-snap-documentation.pdf", "session-snap 9.1.0")
+        (dl / "session-snap-primer.md").write_text('---\ntitle: "session-snap 9.1.0 — Code Primer"\n')
+        self.assertEqual(ss.doc_version(dl / "session-snap-documentation.pdf"), "9.1.0")
+        with mock.patch.object(ss, "download_dirs", return_value=[dl]):
+            out = ss.install_docs("9.1.0")
+        d = ss.docs_dir()
+        self.assertEqual(ss.doc_version(d / "session-snap-documentation.md"), "9.1.0")
+        self.assertEqual(ss.doc_version(d / "session-snap-documentation.pdf"), "9.1.0")
+        self.assertEqual(ss.doc_version(d / "session-snap-primer.md"), "9.1.0")
+        self.assertTrue(any("session-snap-primer.pdf zu Version 9.1.0 NICHT gefunden" in x
+                            for x in out), out)
+        with mock.patch.object(ss, "download_dirs", return_value=[dl]):
+            again = ss.install_docs("9.1.0")
+        self.assertTrue(any("unveraendert" in x for x in again), again)
+        shutil.rmtree(d)
 
     def test_07_key_decoding(self):
         """_getkey(): ESC[B and ESC O B -> down, ESC[6~ -> PgDn, lone Esc -> 27, junk -> -1"""
