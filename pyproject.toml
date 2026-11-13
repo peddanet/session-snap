@@ -1,0 +1,45 @@
+# Tool configuration only - session-snap is a single executable file, not a package
+# (the self-update from the download folder depends on that form, see docs/developer.md).
+
+[tool.pylint.main]
+py-version = "3.11"
+jobs = 1
+
+[tool.pylint.format]
+max-line-length = 100
+
+[tool.pylint.design]
+# One file of ~3900 lines by design (single-file tool, no package). Command functions
+# orchestrate many steps; the limits are raised instead of splitting them artificially.
+max-args = 10
+max-positional-arguments = 10
+max-locals = 40
+max-branches = 40
+max-statements = 130
+max-returns = 10
+max-attributes = 12
+
+[tool.pylint."messages control"]
+disable = [
+    "too-many-lines",   # single-file tool by design
+]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+[tool.bandit]
+# B404/B603/B606/B607: session-snap starts the user's own programs on purpose; every call
+# passes an argument list, never a shell (shell=False). Reviewed per call site.
+skips = ["B404", "B603", "B606", "B607"]
+
+[tool.coverage.run]
+branch = true
+
+[tool.coverage.report]
+# Measured for 1.8.0: 64 % (statements and branches, in-process tests). The floor guards
+# against regressions; raise it when tests are added.
+fail_under = 60
+show_missing = false

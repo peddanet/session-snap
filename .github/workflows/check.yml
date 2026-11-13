@@ -1,0 +1,24 @@
+# Quality gates on every push and pull request: the same stages as tools/check.sh.
+name: check
+
+on:
+  push:
+    branches: [main, develop]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"   # Python of Pop!_OS 24.04 / Ubuntu 24.04
+      - name: Install the check tools (pinned)
+        run: python -m pip install -r tools/requirements-check.txt
+      - name: Run all quality gates
+        run: tools/check.sh
