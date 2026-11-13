@@ -1,0 +1,184 @@
+{
+ "format": 1,
+ "tool": "session-snap",
+ "version": "1.8.0",
+ "created": "2026-11-13T09:30:00",
+ "label": "Lorem ipsum demo",
+ "host": "demo-host",
+ "user": "USER",
+ "session_type": "wayland",
+ "desktop": "COSMIC",
+ "order_source": "watch",
+ "entries": [
+  {
+   "category": "vlc",
+   "program": "vlc",
+   "cmd": [
+    "/usr/bin/vlc",
+    "--started-from-file",
+    "/home/USER/Demo/Videos/Lorem Clip 1.mkv"
+   ],
+   "cwd": "/home/USER",
+   "files": [
+    "/home/USER/Demo/Videos/Lorem Clip 1.mkv"
+   ],
+   "pid": 4101,
+   "start": 104101,
+   "flatpak": "",
+   "protect": "",
+   "order": 0,
+   "argv": [
+    "/usr/bin/vlc",
+    "--started-from-file",
+    "/home/USER/Demo/Videos/Lorem Clip 1.mkv"
+   ],
+   "launched_from": "vlc.desktop",
+   "launched_via": "GIO_LAUNCHED_DESKTOP_FILE"
+  },
+  {
+   "category": "vlc",
+   "program": "mpv",
+   "cmd": [
+    "/usr/bin/mpv",
+    "--player-operation-mode=pseudo-gui",
+    "--",
+    "/home/USER/Demo/Videos/Ipsum Clip 2.mkv"
+   ],
+   "cwd": "/home/USER",
+   "files": [
+    "/home/USER/Demo/Videos/Ipsum Clip 2.mkv"
+   ],
+   "pid": 4102,
+   "start": 104102,
+   "flatpak": "",
+   "protect": "",
+   "order": 1,
+   "argv": [
+    "mpv",
+    "--player-operation-mode=pseudo-gui",
+    "--",
+    "file:///home/USER/Demo/Videos/Ipsum%20Clip%202.mkv"
+   ],
+   "launched_from": "mpv.desktop",
+   "launched_via": "GIO_LAUNCHED_DESKTOP_FILE"
+  },
+  {
+   "category": "image",
+   "program": "eog",
+   "cmd": [
+    "/usr/bin/eog",
+    "/home/USER/Demo/Bilder/Lorem 1.png"
+   ],
+   "cwd": "/home/USER",
+   "files": [
+    "/home/USER/Demo/Bilder/Lorem 1.png"
+   ],
+   "pid": 4103,
+   "start": 104103,
+   "flatpak": "",
+   "protect": "",
+   "order": 2,
+   "argv": [
+    "eog",
+    "/home/USER/Demo/Bilder/Lorem 1.png"
+   ]
+  },
+  {
+   "category": "image",
+   "program": "eog",
+   "cmd": [
+    "/usr/bin/eog",
+    "/home/USER/Demo/Bilder/Lorem 2.png"
+   ],
+   "cwd": "/home/USER",
+   "files": [
+    "/home/USER/Demo/Bilder/Lorem 2.png"
+   ],
+   "pid": 4103,
+   "start": 104103,
+   "flatpak": "",
+   "protect": "",
+   "order": 3,
+   "argv": [
+    "eog",
+    "/home/USER/Demo/Bilder/Lorem 1.png"
+   ],
+   "found_via": "Fenstertitel 'Lorem 2.png'"
+  },
+  {
+   "category": "image",
+   "program": "eog",
+   "cmd": [
+    "/usr/bin/eog",
+    "/home/USER/Demo/Bilder/Ipsum 3.png"
+   ],
+   "cwd": "/home/USER",
+   "files": [
+    "/home/USER/Demo/Bilder/Ipsum 3.png"
+   ],
+   "pid": 4103,
+   "start": 104103,
+   "flatpak": "",
+   "protect": "",
+   "order": 4,
+   "argv": [
+    "eog",
+    "/home/USER/Demo/Bilder/Lorem 1.png"
+   ],
+   "found_via": "Fenstertitel 'Ipsum 3.png'"
+  },
+  {
+   "category": "image",
+   "program": "eog",
+   "cmd": [
+    "/usr/bin/eog",
+    "/home/USER/Demo/Bilder/Ipsum 4.png"
+   ],
+   "cwd": "/home/USER",
+   "files": [
+    "/home/USER/Demo/Bilder/Ipsum 4.png"
+   ],
+   "pid": 4103,
+   "start": 104103,
+   "flatpak": "",
+   "protect": "",
+   "order": 5,
+   "argv": [
+    "eog",
+    "/home/USER/Demo/Bilder/Lorem 1.png"
+   ],
+   "found_via": "Fenstertitel 'Ipsum 4.png'"
+  },
+  {
+   "category": "browser",
+   "program": "firefox",
+   "cmd": [
+    "/usr/bin/firefox"
+   ],
+   "cwd": "/home/USER",
+   "files": [],
+   "pid": 4104,
+   "start": 104104,
+   "flatpak": "",
+   "protect": "",
+   "order": 6
+  },
+  {
+   "category": "rest",
+   "program": "cosmic-edit",
+   "cmd": [
+    "/usr/bin/cosmic-edit",
+    "/home/USER/Demo/Dokumente/lorem-ipsum.txt"
+   ],
+   "cwd": "/home/USER",
+   "files": [
+    "/home/USER/Demo/Dokumente/lorem-ipsum.txt"
+   ],
+   "pid": 4105,
+   "start": 104105,
+   "flatpak": "",
+   "protect": "",
+   "order": 7
+  }
+ ]
+}
