@@ -1,0 +1,5 @@
+# Versions of the check tools that 1.8.0 was verified with (tools/check.sh, CI).
+pylint==4.1.3
+mypy==2.3.1
+bandit==1.9.4
+coverage==7.17.3

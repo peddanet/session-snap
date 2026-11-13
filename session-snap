@@ -26,6 +26,7 @@ Must run as the normal desktop user, never via sudo/root (see check_not_root()).
 from __future__ import annotations
 
 import argparse
+import fcntl
 import configparser
 import curses
 import fnmatch
@@ -46,12 +47,16 @@ import sys
 import textwrap
 import threading
 import time
+import zlib
+from typing import Any, Callable
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
-import xml.etree.ElementTree as ET
+# Only the user's own recently-used.xbel is parsed; expat >= 2.4.1 limits entity expansion
+# and ElementTree resolves no external entities.
+import xml.etree.ElementTree as ET  # nosec B405
 
-VERSION = "1.7.11"
+VERSION = "1.8.0"
 FILE_PREFIX = "session-snap_"
 
 # --------------------------------------------------------------------------- paths
@@ -75,6 +80,8 @@ PROGRAMS_FILE = Path()
 
 def init_paths(base: Path | None = None) -> None:
     """Data directory: SESSION_SNAP_DIR, else ~/scripts/session-snap.d."""
+    # The paths are module-level on purpose: every function uses them, the tests reset them.
+    # pylint: disable=global-statement
     global INSTALL_DIR, PROGRAM, TESTPROG, BASE_DIR, SNAP_DIR, LOG_DIR, BACKUP_DIR
     global LOG_FILE, CONFIG_FILE, PROGRAMS_FILE
     INSTALL_DIR = Path.home() / "scripts"
@@ -195,6 +202,7 @@ def check_not_root() -> None:
 
 
 def setup_logging() -> None:
+    """Open the activity log (re-initialised after the paths changed)."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     for h in list(log.handlers):  # re-initialisation: close the previous log file
         log.removeHandler(h)
@@ -245,7 +253,8 @@ def parse_maximize(value: str) -> set:
 
 
 def load_config() -> dict:
-    cfg = {"exclude": list(DEFAULT_EXCLUDE), "include": [], "protect": [],
+    """Defaults, overridden by config.ini; returns the configuration dict."""
+    cfg: dict[str, Any] = {"exclude": list(DEFAULT_EXCLUDE), "include": [], "protect": [],
            "image_viewers": set(IMAGE_VIEWERS), "video_players": set(VIDEO_PLAYERS),
            "delay": 0.4, "kill_timeout": 5.0, "maximize_timeout": 20.0, "order": "saved",
            "maximize": parse_maximize(DEFAULT_MAXIMIZE),
@@ -290,7 +299,7 @@ def load_config() -> dict:
             cfg["overlay"] = s.get("overlay", "").strip().lower() not in ("no", "nein", "0",
                                                                          "false", "off")
         if s.get("order", "").strip() in ("saved", "keep"):
-            cfg["order"] = s.get("order").strip()
+            cfg["order"] = s.get("order", "").strip()
         for key in ("delay", "kill_timeout", "maximize_timeout"):
             try:
                 cfg[key] = float(s.get(key, cfg[key]))
@@ -343,6 +352,7 @@ nomacs = --fullscreen
 
 # =========================================================================== /proc scan
 class Proc:
+    """One process read from /proc (identity: PID and start time)."""
     __slots__ = ("pid", "ppid", "argv", "exe", "cwd", "start", "flatpak_id", "flatpak_inst")
 
     def __init__(self, pid, ppid, argv, exe, cwd, start):
@@ -353,6 +363,7 @@ class Proc:
 
     @property
     def names(self) -> set:
+        """Program names of the process: basename of the executable and of argv[0]."""
         a0 = self.argv[0] if self.argv else ""
         if " " in a0 and not os.path.exists(a0):  # some apps rewrite argv into one string
             a0 = a0.split(" ")[0]
@@ -360,6 +371,7 @@ class Proc:
 
     @property
     def name(self) -> str:
+        """Most specific single program name."""
         if self.exe:
             return os.path.basename(self.exe)
         return os.path.basename(self.argv[0]) if self.argv else "?"
@@ -376,6 +388,7 @@ def read_stat(pid: int) -> tuple[str, int, int] | None:
 
 
 def scan_processes() -> dict:
+    """All processes of the current user except this one: {pid: Proc}."""
     uid, me = os.getuid(), os.getpid()
     procs = {}
     for d in os.listdir("/proc"):
@@ -412,6 +425,7 @@ def scan_processes() -> dict:
 
 
 def argv_files(p: Proc) -> list:
+    """Existing files named on the command line (also file:// URLs)."""
     out = []
     for a in p.argv[1:]:
         if a.startswith("file://"):
@@ -446,7 +460,8 @@ def file_cmd(head: list, argv: list, file_idx: set, path: str) -> list:
     """Restart command for ONE file with the ORIGINAL program and options:
     `head` replaces argv[0]; all file and URL arguments are removed and `path` is put where
     the first file argument stood (after a possible `--`), else appended."""
-    rest, pos = [], None
+    rest: list = []
+    pos: int | None = None
     for i, a in enumerate(argv[1:], 1):
         if i in file_idx or "://" in a:
             if pos is None and i in file_idx:
@@ -512,9 +527,10 @@ def launched_from(pid: int, ppid: int, desktop_ids: set | None = None) -> tuple[
 
 
 def fd_files(pid: int, exts: set) -> list:
+    """Open files with one of the extensions `exts`, outside caches and configs."""
     home = str(Path.home())
     ignore = FD_IGNORE_PREFIX + (home + "/.cache/", home + "/.config/")
-    out = []
+    out: list = []
     d = f"/proc/{pid}/fd"
     try:
         fds = os.listdir(d)
@@ -530,7 +546,8 @@ def fd_files(pid: int, exts: set) -> list:
 
 
 def _parse_desktop(path: Path) -> dict:
-    data, in_main = {}, False
+    data: dict = {}
+    in_main = False
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -722,7 +739,7 @@ def app_window_entries(entries: list, windows: list | None, procs: dict,
                      if browser_family(" ".join([b["program"]] + b["cmd"][:1])) == fam
                      and _opt_value(b["cmd"], "--user-data-dir") == udd), None)
         p = procs.get(host["pid"]) if host else None
-        if p is None:
+        if p is None or host is None:
             continue
         out.append(dict(_entry(CAT_BROWSER, a["name"], toks, [], p, host.get("flatpak", ""),
                                host.get("protect", "")), app=True))
@@ -738,7 +755,7 @@ def desktop_aliases() -> dict:
     Cached per XDG data directories."""
     key = (os.environ.get("XDG_DATA_HOME", ""), os.environ.get("XDG_DATA_DIRS", ""))
     if key not in _ALIAS_CACHE:
-        out = {}
+        out: dict = {}
         for a in desktop_apps(include_hidden=True):
             toks = exec_tokens(a["exec"])
             if toks and os.path.basename(toks[0]) == "env":
@@ -755,6 +772,7 @@ def desktop_aliases() -> dict:
 
 
 def mime_of(path: str) -> str:
+    """MIME type guessed from the file name ('' if unknown)."""
     return mimetypes.guess_type(path, strict=False)[0] or ""
 
 
@@ -770,6 +788,7 @@ def handlers_for(mimes: list, apps: list | None = None) -> list:
 
 
 def load_programs() -> dict:
+    """Program choice per slot from programs.ini ({} if missing)."""
     cp = configparser.ConfigParser(interpolation=None)
     try:
         cp.read(PROGRAMS_FILE, encoding="utf-8")
@@ -781,6 +800,7 @@ def load_programs() -> dict:
 
 
 def save_programs(progs: dict) -> None:
+    """Write the program choice to programs.ini (atomically)."""
     cp = configparser.ConfigParser(interpolation=None)
     cp["programs"] = {k: v for k, v in progs.items() if v}
     BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -794,6 +814,7 @@ def save_programs(progs: dict) -> None:
 
 
 def program_label(spec: str | None, apps: list | None = None) -> str:
+    """Readable name of a program choice ('wie aufgezeichnet' if none)."""
     if not spec:
         return "wie aufgezeichnet"
     if spec.endswith(".desktop"):
@@ -872,6 +893,7 @@ ENV_PATTERNS = ("GTK_*", "GDK_*", "QT_*", "ADW_*", "GSETTINGS_*", "XCURSOR_*",
 
 
 def is_look_var(name: str) -> bool:
+    """True if the environment variable belongs to the appearance."""
     return any(fnmatch.fnmatchcase(name, pat) for pat in ENV_PATTERNS)
 
 
@@ -987,6 +1009,7 @@ RESUME_PREF = "browser.sessionstore.resume_session_once"
 
 
 def chrome_data_dir(e: dict) -> Path | None:
+    """User data directory of a Chrome-based browser entry (None if unknown)."""
     udd = _opt_value(e["cmd"], "--user-data-dir")
     if udd:
         return Path(udd).expanduser()
@@ -997,6 +1020,8 @@ def chrome_data_dir(e: dict) -> Path | None:
 def chrome_profiles(data_dir: Path | None) -> list:
     """[(profile directory, display name)] of the profiles open at the moment (or at the end
     of the last run), from Chrome's 'Local State'."""
+    if data_dir is None:
+        return []
     try:
         st = json.loads((data_dir / "Local State").read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
@@ -1021,6 +1046,7 @@ def firefox_profile_dir(pid: int) -> str:
 
 
 def is_firefox(e: dict) -> bool:
+    """True if the entry is a Firefox (also LibreWolf, Firefox flatpak)."""
     names = {e["program"], os.path.basename(e["cmd"][0]) if e["cmd"] else ""}
     return bool(names & FIREFOX_NAMES) or e.get("flatpak") == "org.mozilla.firefox"
 
@@ -1121,34 +1147,35 @@ def prepare_browser_sessions(entries: list, dry_run: bool = False) -> list:
 
 def _flatpak_entries(procs: dict, cfg: dict) -> list:
     """Flatpak apps, grouped by sandbox instance; restarted via `flatpak run <app-id>`."""
-    entries, groups = [], {}
+    entries: list = []
+    groups: dict = {}
     for p in procs.values():
-        if p.flatpak_id and not (p.names & GENERIC_NAMES):
+        if p.flatpak_id and not p.names & GENERIC_NAMES:
             groups.setdefault(p.flatpak_inst or f"{p.flatpak_id}:{p.pid}", []).append(p)
     for group in groups.values():
         group.sort(key=lambda q: q.start)
-        main, app = group[0], group[0].flatpak_id
+        first, app = group[0], group[0].flatpak_id
         if _match_any([app], cfg["exclude"]):
             continue
         argf = _uniq([f for q in group for f in argv_files(q)])
         launcher = ["flatpak", "run", app]
-        prot = protect_reason(main.argv, cfg)
+        prot = protect_reason(first.argv, cfg)
         if app in BROWSER_FLATPAKS:
-            entries += _make_entries(CAT_BROWSER, app, launcher, launcher, [], main, app, prot)
-            if app_flag(main.argv):
+            entries += _make_entries(CAT_BROWSER, app, launcher, launcher, [], first, app, prot)
+            if app_flag(first.argv):
                 entries.append(dict(_entry(CAT_BROWSER, f"{app} (App)",
-                                           launcher + [app_flag(main.argv)], [], main, app,
+                                           launcher + [app_flag(first.argv)], [], first, app,
                                            prot), app=True))
         elif app in VLC_FLATPAKS:
             fds = [f for q in group for f in fd_files(q.pid, MEDIA_EXT | IMAGE_EXT)]
             files = _uniq(argf + fds)
-            entries += _make_entries(CAT_VLC, app, launcher, launcher, files, main, app, prot)
+            entries += _make_entries(CAT_VLC, app, launcher, launcher, files, first, app, prot)
         elif app in IMAGE_FLATPAKS or (argf and all(_ext(f) in IMAGE_EXT for f in argf)):
             fds = [f for q in group for f in fd_files(q.pid, IMAGE_EXT)]
             files = _uniq([f for f in argf if _ext(f) in IMAGE_EXT] + fds)
-            entries += _make_entries(CAT_IMG, app, launcher, launcher, files, main, app, prot)
+            entries += _make_entries(CAT_IMG, app, launcher, launcher, files, first, app, prot)
         else:
-            entries += _make_entries(CAT_REST, app, launcher, launcher + argf, argf, main, app,
+            entries += _make_entries(CAT_REST, app, launcher, launcher + argf, argf, first, app,
                                      prot)
     return entries
 
@@ -1251,10 +1278,12 @@ def signature(e: dict) -> tuple:
 
 # =========================================================================== snapshots
 def snapshot_name(now: datetime) -> str:
+    """File name of a snapshot taken at `now`."""
     return f"{FILE_PREFIX}{now.strftime('%Y-%m-%d_%H-%M-%S')}.json"
 
 
 def save_snapshot(entries: list, label: str = "", order_source: str = "") -> Path:
+    """Write the entries as a new snapshot file; returns its path."""
     SNAP_DIR.mkdir(parents=True, exist_ok=True)
     now = datetime.now()
     path, n = SNAP_DIR / snapshot_name(now), 1
@@ -1279,11 +1308,13 @@ def save_snapshot(entries: list, label: str = "", order_source: str = "") -> Pat
 
 
 def load_snapshot(path: Path) -> dict:
+    """Read a snapshot file."""
     with open(path, encoding="utf-8", errors="surrogateescape") as fh:
         return json.load(fh)
 
 
 def list_snapshots() -> list:
+    """Snapshot files, newest first (archived ones excluded)."""
     if not SNAP_DIR.is_dir():
         return []
     return sorted(SNAP_DIR.glob(f"{FILE_PREFIX}*.json"), key=lambda p: p.name, reverse=True)
@@ -1295,6 +1326,7 @@ def archive_dir() -> Path:
 
 
 def list_archived() -> list:
+    """Archived snapshot files, newest first."""
     d = archive_dir()
     if not d.is_dir():
         return []
@@ -1326,6 +1358,7 @@ def move_snapshot(path: Path, to_archive: bool) -> Path:
 
 
 def delete_snapshot(path: Path) -> None:
+    """Delete a snapshot file."""
     path.unlink()
     log.info("snapshot deleted: %s", path)
 
@@ -1338,6 +1371,7 @@ def _counts(entries) -> str:
 
 
 def snapshot_title(path: Path) -> str:
+    """One line for menus: creation time, label and counts per category."""
     try:
         d = load_snapshot(path)
     except (OSError, json.JSONDecodeError) as exc:
@@ -1349,6 +1383,7 @@ def snapshot_title(path: Path) -> str:
 
 # =========================================================================== launching
 def launch(e: dict, ref=False) -> tuple[bool, str]:
+    """Start one entry detached from this terminal; returns (ok, message)."""
     cmd = list(e["cmd"])
     if not cmd:
         return False, "leerer Befehl"
@@ -1358,7 +1393,7 @@ def launch(e: dict, ref=False) -> tuple[bool, str]:
     missing = [f for f in e.get("files", []) if not os.path.exists(f)]
     if missing and e["category"] in (CAT_VLC, CAT_IMG):
         return False, f"Datei fehlt: {missing[0]}"
-    cwd = e.get("cwd") if e.get("cwd") and os.path.isdir(e["cwd"]) else str(Path.home())
+    cwd = e["cwd"] if e.get("cwd") and os.path.isdir(e["cwd"]) else str(Path.home())
     try:
         spawn_detached(cmd, cwd, restore_env(e.get("env"), ref))
     except OSError as exc:
@@ -1387,7 +1422,7 @@ def spawn_detached(cmd: list, cwd: str, env: dict | None = None) -> None:
             if env is None:
                 os.execvp(cmd[0], cmd)
             os.execvpe(cmd[0], cmd, env)
-        except BaseException as exc:  # noqa: BLE001 - must never return into the parent code
+        except BaseException as exc:  # pylint: disable=broad-exception-caught  # child process
             try:
                 os.write(w, f"{type(exc).__name__}: {exc}".encode()[:512])
             finally:
@@ -1452,6 +1487,7 @@ def _app_window_appears(e: dict, timeout: float) -> bool:
 def run_launches(entries: list, delay: float, dry_run: bool = False,
                  maximize: set | None = None, max_timeout: float = 20.0,
                  fullscreen: set | None = None) -> int:
+    """Start the entries one after another, then maximize / fullscreen the windows."""
     if not dry_run and not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
         print("Warnung: weder WAYLAND_DISPLAY noch DISPLAY gesetzt "
               "- keine grafische Sitzung erkennbar.")
@@ -1509,7 +1545,7 @@ def run_launches(entries: list, delay: float, dry_run: bool = False,
         if delay > 0 and i < len(entries):
             time.sleep(delay)
     if maximizer is not None:
-        expected = {}
+        expected: dict = {}
         for e in started_max:
             key = "|".join(sorted(window_names(e)))
             expected.setdefault(key, []).append(modes[id(e)])
@@ -1550,7 +1586,9 @@ class Overlay:
     current = None
 
     def __init__(self, title: str, enabled: bool = True):
-        self.title, self.id, self.mon, self.thread = title, 0, None, None
+        self.title, self.id = title, 0
+        self.mon: subprocess.Popen | None = None
+        self.thread: threading.Thread | None = None
         self.cancelled = False
         self.enabled = bool(enabled and os.environ.get("SESSION_SNAP_OVERLAY", "1") != "0"
                             and os.environ.get("DBUS_SESSION_BUS_ADDRESS")
@@ -1559,13 +1597,15 @@ class Overlay:
     def _call(self, method: str, *args) -> str:
         r = subprocess.run(["gdbus", "call", "--session", *NOTIFY, "--method",
                             f"{NOTIFY_IFACE}.{method}", *args],
-                           capture_output=True, text=True, timeout=5)
+                           capture_output=True, text=True, timeout=5, check=False)
         if r.returncode:
             raise OSError(r.stderr.strip() or f"gdbus {method}: Fehler {r.returncode}")
         return r.stdout
 
     def _watch(self) -> None:
         """reads the D-Bus signals; the button sends ActionInvoked(id, 'cancel')"""
+        if self.mon is None or self.mon.stdout is None:
+            return
         for line in self.mon.stdout:
             if ("ActionInvoked" in line and f"(uint32 {self.id}," in line
                     and "'cancel'" in line):
@@ -1575,13 +1615,15 @@ class Overlay:
                 return
 
     def show(self, text: str) -> None:
+        """Show or update the notice (silently disabled on any error)."""
         if not self.enabled:
             return
         try:
             if self.mon is None:
-                self.mon = subprocess.Popen(["gdbus", "monitor", "--session", *NOTIFY],
-                                            stdout=subprocess.PIPE,
-                                            stderr=subprocess.DEVNULL, text=True)
+                # lives across show() calls, ended in close()
+                self.mon = subprocess.Popen(  # pylint: disable=consider-using-with
+                    ["gdbus", "monitor", "--session", *NOTIFY],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
                 self.thread = threading.Thread(target=self._watch, daemon=True)
                 self.thread.start()
             out = self._call("Notify", "session-snap", str(self.id), "system-run",
@@ -1598,6 +1640,7 @@ class Overlay:
             self.enabled = False
 
     def close(self) -> None:
+        """Remove the notice and stop listening for the button."""
         if self.id:
             try:
                 self._call("CloseNotification", str(self.id))
@@ -1611,7 +1654,8 @@ class Overlay:
             except subprocess.TimeoutExpired:
                 self.mon.kill()
                 self.mon.wait()
-            self.mon.stdout.close()
+            if self.mon.stdout is not None:
+                self.mon.stdout.close()
             self.mon = None
 
     def __enter__(self):
@@ -1658,11 +1702,11 @@ def kill_targets(cfg: dict, snap_entries: list) -> tuple[list, list]:
     wanted = {signature(e) for e in snap_entries}
     prot = protected_pids()
     current = build_entries(cfg)
-    apps_of = {}
+    apps_of: dict = {}
     for e in current:
         if e.get("app"):
             apps_of.setdefault(e["pid"], []).append((e["program"], e["cmd"]))
-    by_pid = {}
+    by_pid: dict = {}
     for e in current:
         if signature(e) not in wanted:
             continue
@@ -1796,7 +1840,7 @@ STATE_FULLSCREEN = 3
 
 
 class WaylandError(Exception):
-    pass
+    """The compositor is missing, refused a request or closed the connection."""
 
 
 class _Wl:
@@ -1818,13 +1862,14 @@ class _Wl:
         self.buf = b""
         self.next_id = 2
         self.types = {1: "wl_display"}
-        self.globals = {}          # interface -> (name, version)
-        self.handles = {}          # handle id -> {"app_id", "title", "states", "done"}
-        self.caps = set()
-        self.synced = set()
-        self.on_done = None        # callback(handle id) after every complete state update
+        self.globals: dict = {}          # interface -> (name, version)
+        self.handles: dict = {}          # handle id -> {"app_id", "title", "states", "done"}
+        self.caps: set = set()
+        self.synced: set = set()
+        # callback(handle id) after every complete state update
+        self.on_done: Callable | None = None
         self.registry = self._new("wl_registry")
-        self._send(1, 1, ("n", self.registry))           # wl_display.get_registry
+        self.send(1, 1, ("n", self.registry))           # wl_display.get_registry
 
     # -- encoding ------------------------------------------------------------------------
     def _new(self, typ: str) -> int:
@@ -1837,22 +1882,25 @@ class _Wl:
         b = v.encode() + b"\0"
         return struct.pack("=I", len(b)) + b + b"\0" * (-len(b) % 4)
 
-    def _send(self, obj: int, opcode: int, *args) -> None:
+    def send(self, obj: int, opcode: int, *args) -> None:
+        """Send one request: (kind, value) pairs, kind 's' string, else 32-bit word."""
         payload = b""
         for kind, v in args:
             payload += self._str(v) if kind == "s" else struct.pack("=I", v)
         self.sock.sendall(struct.pack("=II", obj, (8 + len(payload)) << 16 | opcode) + payload)
 
     def bind(self, interface: str, version: int) -> int:
+        """Bind a global interface; returns the new object id."""
         name, have = self.globals[interface]
         oid = self._new(interface)
-        self._send(self.registry, 0, ("u", name), ("s", interface), ("u", min(version, have)),
+        self.send(self.registry, 0, ("u", name), ("s", interface), ("u", min(version, have)),
                    ("n", oid))
         return oid
 
     def roundtrip(self) -> None:
+        """Wait until the compositor has handled every request sent so far."""
         cb = self._new("wl_callback")
-        self._send(1, 0, ("n", cb))                         # wl_display.sync
+        self.send(1, 0, ("n", cb))                         # wl_display.sync
         while cb not in self.synced:
             self.dispatch()
 
@@ -1876,6 +1924,7 @@ class _Wl:
         return s, off + 4 + n + (-n % 4)
 
     def dispatch(self) -> None:
+        """Read and handle one event."""
         obj, op, p = self._read_msg()
         typ = self.types.get(obj, "")
         if typ == "wl_display" and op == 0:
@@ -1925,6 +1974,7 @@ class _Wl:
                 self.dispatch()
 
     def close(self) -> None:
+        """Close the connection."""
         self.sock.close()
 
 
@@ -1979,14 +2029,16 @@ class WindowMaximizer:
         self.old = set(self.wl.handles)
 
     def close(self) -> None:
+        """Close the connection."""
         self.wl.close()
 
     def _request(self, hid: int, mode: str) -> None:
+        """Ask the compositor to fullscreen or maximize window `hid` (once)."""
         if mode == MODE_FULL:
             if STATE_FULLSCREEN not in self.wl.handles[hid]["states"]:
-                self.wl._send(self.manager, 7, ("u", hid), ("u", 0))  # set_fullscreen(, null)
+                self.wl.send(self.manager, 7, ("u", hid), ("u", 0))  # set_fullscreen(, null)
         elif STATE_MAXIMIZED not in self.wl.handles[hid]["states"]:
-            self.wl._send(self.manager, 3, ("u", hid))                 # set_maximized
+            self.wl.send(self.manager, 3, ("u", hid))                 # set_maximized
 
     def run(self, expected: dict, timeout: float, settle: float = 6.0) -> list:
         """expected: '|'-joined program names -> number of windows (maximize) or list of
@@ -1998,7 +2050,8 @@ class WindowMaximizer:
         todo = {k: ([MODE_MAX] * v if isinstance(v, int) else list(v))
                 for k, v in expected.items()}
         want = sum(len(v) for v in todo.values())
-        done, start = {}, time.monotonic()
+        done: dict = {}
+        start = time.monotonic()
         last = start
         while len(done) < want:
             now = time.monotonic()
@@ -2073,9 +2126,9 @@ def recent_files() -> list:
     newest first. Program names come from the exec attribute ('eog %u' -> 'eog')."""
     path = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
     ns = "{http://www.freedesktop.org/standards/desktop-bookmarks}"
-    out = []
+    out: list = []
     try:
-        root = ET.parse(path / "recently-used.xbel").getroot()
+        root = ET.parse(path / "recently-used.xbel").getroot()  # nosec B314 - own file
     except (OSError, ET.ParseError):
         return out
     for bm in root.iter("bookmark"):
@@ -2099,7 +2152,7 @@ def recent_files() -> list:
 
 def inotify_dirs(pid: int) -> set:
     """(major, minor, inode) of all objects a process watches with inotify (fdinfo)."""
-    out = set()
+    out: set = set()
     try:
         fds = os.listdir(f"/proc/{pid}/fdinfo")
     except OSError:
@@ -2160,7 +2213,7 @@ def add_window_files(entries: list, windows: list | None) -> list:
     Without window information (no COSMIC) the entries stay as recorded."""
     if not windows:
         return entries
-    groups = {}
+    groups: dict = {}
     for e in entries:
         if e["category"] == CAT_IMG:
             groups.setdefault(e["pid"], []).append(e)
@@ -2183,7 +2236,8 @@ def add_window_files(entries: list, windows: list | None) -> list:
             keep.update(hit)
         else:
             rest.append((pids[0], title))
-    added, seen = {}, {e["files"][0] for g in groups.values() for e in g if e["files"]}
+    added: dict = {}
+    seen = {e["files"][0] for g in groups.values() for e in g if e["files"]}
     recent = recent_files() if rest else []
     for pid, title in rest:
         tmpl = groups[pid][0]
@@ -2239,7 +2293,6 @@ def _lock_file() -> Path:
 
 def watcher_alive() -> bool:
     """True if a 'session-snap watch' process holds the lock."""
-    import fcntl
     try:
         fd = os.open(_lock_file(), os.O_RDONLY | os.O_CREAT, 0o644)
     except OSError:
@@ -2290,7 +2343,7 @@ def watch_once(wl: "_Wl", run_for: float | None = None) -> None:
         mru.append(h)
     for h in mru:
         wl.handles[h]["was_active"] = h in active
-    snap = [None]
+    snap: list = [None]
 
     def update(h=None):
         """called for every 'done' event: the state at exactly that moment counts, so that
@@ -2324,7 +2377,6 @@ def watch_once(wl: "_Wl", run_for: float | None = None) -> None:
 
 def cmd_watch(run_for: float | None = None) -> int:
     """Background process: record the Alt-Tab order (started by the autostart entry)."""
-    import fcntl
     BASE_DIR.mkdir(parents=True, exist_ok=True)
     fd = os.open(_lock_file(), os.O_RDWR | os.O_CREAT, 0o644)
     try:
@@ -2359,12 +2411,14 @@ def cmd_watch(run_for: float | None = None) -> int:
 
 
 def cmd_watch_cli(stop: bool, status: bool, start: bool) -> int:
+    """Command 'watch' with --stop, --status or --start."""
     if stop:
         print("Mitschreiber beendet." if stop_watcher() else "Mitschreiber lief nicht.")
         return 0
     if status:
         alive = watcher_alive()
-        print(f"Mitschreiber: {'laeuft (PID ' + str(watch_pid()) + ')' if alive else 'laeuft NICHT'}"
+        state = f"laeuft (PID {watch_pid()})" if alive else "laeuft NICHT"
+        print(f"Mitschreiber: {state}"
               f"; Autostart: {'ja' if autostart_file().exists() else 'nein'}")
         if alive and _order_file().exists():
             age = time.time() - _order_file().stat().st_mtime
@@ -2378,6 +2432,7 @@ def cmd_watch_cli(stop: bool, status: bool, start: bool) -> int:
 
 
 def watch_pid() -> int | None:
+    """PID written by the running background process (None if none)."""
     try:
         return int(_lock_file().read_text().strip() or 0) or None
     except (OSError, ValueError):
@@ -2385,6 +2440,7 @@ def watch_pid() -> int | None:
 
 
 def autostart_file() -> Path:
+    """Autostart entry of the background process."""
     return Path.home() / ".config" / "autostart" / "session-snap-watch.desktop"
 
 
@@ -2412,6 +2468,7 @@ def install_watcher(start: bool = True) -> list:
 
 
 def stop_watcher(timeout: float = 3.0) -> bool:
+    """End the background process; True if it ran and has ended."""
     pid = watch_pid()
     if not pid or not watcher_alive():
         return False
@@ -2562,7 +2619,7 @@ def reorder_windows(entries: list, timeout: float = 20.0, settle: float = 6.0,
         done = []
         for i in sorted(found, key=lambda k: want[k]["order"]):
             h = found[i]
-            wl._send(manager, 2, ("u", h), ("u", seat))          # activate(toplevel, seat)
+            wl.send(manager, 2, ("u", h), ("u", seat))          # activate(toplevel, seat)
             wl.roundtrip()
             time.sleep(pause)
             done.append((wl.handles[h]["app_id"], wl.handles[h]["title"]))
@@ -2592,6 +2649,7 @@ def static_version(path) -> str | None:
 
 
 def vkey(v: str | None) -> tuple:
+    """Comparable key of a version string: '1.7.10' -> (1, 7, 10)."""
     return tuple(int(x) for x in re.findall(r"\d+", v or "")) or (-1,)
 
 
@@ -2659,7 +2717,8 @@ def download_dirs() -> list:
 def find_downloads() -> tuple[list, list]:
     """([(version, mtime, path)] programs, [(version, mtime, path)] test programs) found in
     the download directories, newest version first."""
-    progs, tests = [], []
+    progs: list = []
+    tests: list = []
     for d in download_dirs():
         try:
             names = os.listdir(d)
@@ -2673,7 +2732,8 @@ def find_downloads() -> tuple[list, list]:
             v = static_version(p)
             if v:
                 kind.append((v, p.stat().st_mtime, p))
-    key = lambda t: (vkey(t[0]), t[1])  # noqa: E731
+    def key(t):
+        return (vkey(t[0]), t[1])
     return sorted(progs, key=key, reverse=True), sorted(tests, key=key, reverse=True)
 
 
@@ -2727,7 +2787,7 @@ def _install_file(src: Path, dest: Path, stem: str) -> str:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp-install")
     shutil.copyfile(src, tmp)
-    os.chmod(tmp, 0o755)
+    os.chmod(tmp, 0o755)  # nosec B103 - executable program file
     os.replace(tmp, dest)  # atomic: a running instance keeps its (old) file content
     return f"{dest}: installiert ({static_version(dest) or '?'})"
 
@@ -2764,7 +2824,7 @@ def migrate(self_src: bytes | None = None) -> list:
     if self_src is not None and not PROGRAM.exists():
         tmp = PROGRAM.with_name(PROGRAM.name + ".tmp-install")
         tmp.write_bytes(self_src)
-        os.chmod(tmp, 0o755)
+        os.chmod(tmp, 0o755)  # nosec B103 - executable program file
         os.replace(tmp, PROGRAM)
         done.append(f"{PROGRAM}: installiert ({VERSION})")
     for name, stem in (("session-snap.py", "session-snap"),
@@ -2869,11 +2929,12 @@ _DOC_VER = re.compile(r"session-snap ([0-9][0-9A-Za-z.\-]*)")
 
 
 def docs_dir() -> Path:
+    """Folder for the documentation of the installed version."""
     return BASE_DIR / "docs"
 
 
 def _pdf_title(path: Path) -> str:
-    import zlib
+    """Title of the PDF document information (also from a compressed object stream)."""
     data = path.read_bytes()
     blobs = [data]
     for m in re.finditer(rb"stream\r?\n", data):
@@ -2917,7 +2978,7 @@ def install_docs(version: str, extra_dirs: list | None = None) -> list:
     """Copy documentation and primer (.md and .pdf) of `version` from the download folders
     (and extra_dirs) to docs/. An older installed copy is backed up first. Returns messages;
     a missing file is named, so that it can be generated or downloaded."""
-    found = {}
+    found: dict = {}
     for d in list(extra_dirs or []) + download_dirs():
         try:
             names = os.listdir(d)
@@ -2959,7 +3020,7 @@ def install_docs(version: str, extra_dirs: list | None = None) -> list:
 
 def install_version(prog: Path, tests: list) -> None:
     """Install program file `prog` and the test program of the same version (if found)."""
-    v = static_version(prog)
+    v = static_version(prog) or "?"
     print(_install_file(prog, PROGRAM, "session-snap"))
     match = [t for _v, _m, t in tests if _v == v]
     if match:
@@ -3179,7 +3240,7 @@ def checklist(title: str, entries: list, preselect: list,
     if foldable:
         return checklist_folding(title, entries, preselect, running)
     running = running or set()
-    rows = []  # ("hdr", category, count) | ("item", index)
+    rows: list[tuple] = []  # ("hdr", category, count) | ("item", index)
     for cat in CAT_ORDER:
         idx = [i for i, e in enumerate(entries) if e["category"] == cat]
         if idx:
@@ -3206,7 +3267,7 @@ def checklist(title: str, entries: list, preselect: list,
                         for i, r in enumerate(rows)]
             heights = [len(x) for x in rendered]
             top = min(top, cr)
-            if (top == cr and cr > 0 and rows[cr - 1][0] == "hdr"
+            if (0 < cr == top and rows[cr - 1][0] == "hdr"
                     and heights[cr - 1] + heights[cr] <= body_h):
                 top = cr - 1  # keep the category header visible
             while top < cr and sum(heights[top:cr + 1]) > body_h:
@@ -3266,7 +3327,7 @@ def checklist(title: str, entries: list, preselect: list,
     return curses.wrapper(ui)
 
 
-def _fold_header(cat, count, entries, sel, is_cur, expanded, w):
+def _fold_header(cat, count, entries, sel, is_cur, expanded):
     """One line for a category header of the folding checklist (cat None = root 'Alle')."""
     idx = [i for i, e in enumerate(entries) if cat is None or e["category"] == cat]
     n_sel = sum(sel[i] for i in idx)
@@ -3309,10 +3370,10 @@ def checklist_folding(title: str, entries: list, preselect: list,
     count = {c: sum(e["category"] == c for e in entries) for c in cats}
     expanded = set(cats) if len(cats) == 1 else set()
     sel = list(preselect)
-    ROOT = ("root",)
+    root = ("root",)
 
     def visible():
-        out = [ROOT]
+        out = [root]
         for c in cats:
             out.append(("hdr", c, count[c]))
             if c in expanded:
@@ -3321,7 +3382,7 @@ def checklist_folding(title: str, entries: list, preselect: list,
 
     def group(row):
         """entry indices covered by a row"""
-        if row == ROOT:
+        if row == root:
             return list(range(len(entries)))
         if row[0] == "hdr":
             return [i for i, e in enumerate(entries) if e["category"] == row[1]]
@@ -3335,7 +3396,7 @@ def checklist_folding(title: str, entries: list, preselect: list,
 
     def ui(scr):
         _ui_setup(scr)
-        cur_row, top = ROOT, 0
+        cur_row, top = root, 0
         while True:
             rows = visible()
             cur = rows.index(cur_row) if cur_row in rows else 0
@@ -3351,12 +3412,12 @@ def checklist_folding(title: str, entries: list, preselect: list,
                 continue
             rendered = []
             for j, r in enumerate(rows):
-                if r == ROOT:
+                if r == root:
                     rendered.append(_fold_header(None, len(entries), entries, sel, j == cur,
-                                                 len(expanded) == len(cats), w))
+                                                 len(expanded) == len(cats)))
                 elif r[0] == "hdr":
                     rendered.append(_fold_header(r[1], r[2], entries, sel, j == cur,
-                                                 r[1] in expanded, w))
+                                                 r[1] in expanded))
                 else:    # entries are drawn 4 columns further right: wrap 4 narrower
                     rendered.append(_render_row(r, w - 4, j == cur, entries, sel, running))
             heights = [len(x) for x in rendered]
@@ -3365,7 +3426,7 @@ def checklist_folding(title: str, entries: list, preselect: list,
                 top += 1
             y = body_top
             for r in range(top, len(rows)):
-                x = 1 if rows[r] == ROOT else (3 if rows[r][0] == "hdr" else 5)
+                x = 1 if rows[r] == root else (3 if rows[r][0] == "hdr" else 5)
                 for text, attr in rendered[r]:
                     if y >= body_top + body_h:
                         break
@@ -3395,13 +3456,13 @@ def checklist_folding(title: str, entries: list, preselect: list,
             elif k == curses.KEY_END:
                 cur_row = rows[last]
             elif k == curses.KEY_RIGHT:
-                if cur_row == ROOT:
+                if cur_row == root:
                     expanded.update(cats)
                 else:
                     expanded.add(cur_row[1] if cur_row[0] == "hdr"
                                  else entries[cur_row[1]]["category"])
             elif k == curses.KEY_LEFT:
-                if cur_row == ROOT:
+                if cur_row == root:
                     expanded.clear()
                 else:
                     cat = (cur_row[1] if cur_row[0] == "hdr"
@@ -3474,8 +3535,8 @@ def choose_programs(entries: list) -> None:
     all_apps = desktop_apps(include_hidden=True)
     while True:
         progs = load_programs()
-        opts = [f"{SLOT_LABEL[s]}: {program_label(progs.get(s), all_apps)}"
-                for s in SLOT_LABEL] + ["Zurueck"]
+        opts = [f"{label}: {program_label(progs.get(s), all_apps)}"
+                for s, label in SLOT_LABEL.items()] + ["Zurueck"]
         idx = menu("Programme waehlen", opts,
                    info=["Gilt fuer das Oeffnen beim Wiederherstellen. Gespeichert in:",
                          str(PROGRAMS_FILE)])
@@ -3503,6 +3564,7 @@ def choose_programs(entries: list) -> None:
 
 # =========================================================================== commands
 def pick_snapshot(spec: str | None) -> Path | None:
+    """Snapshot chosen by `spec` ('latest', name, number) or in a menu."""
     snaps = list_snapshots()
     if not snaps:
         print(f"Keine Snapshots vorhanden in {SNAP_DIR}")
@@ -3539,6 +3601,7 @@ def _snap_info(path: Path, data: dict) -> str:
 
 def cmd_save(cfg, label: str | None, interactive: bool, kill_after: bool = False,
              force: bool = False, relaunch: bool = True) -> int:
+    """Command 'save': record the programs and write a snapshot."""
     entries = build_entries(cfg)
     print(f"Erfasst: {len(entries)} Eintraege  [{_counts(entries)}]")
     if not entries:
@@ -3646,9 +3709,10 @@ def running_signatures(cfg) -> set:
 def cmd_restore(cfg, spec: str | None, start_all: bool, dry_run: bool,
                 overrides: dict | None = None, player_opts: bool = True,
                 maximize: bool = True, order: str | None = None) -> int:
+    """Command 'restore': start the programs of a snapshot that do not run."""
     path = pick_snapshot(spec)
     data = _load_or_report(path) if path else None
-    if data is None:
+    if path is None or data is None:
         return 1
     entries = data.get("entries", [])
     if not entries:
@@ -3656,13 +3720,14 @@ def cmd_restore(cfg, spec: str | None, start_all: bool, dry_run: bool,
         return 0
     running = running_signatures(cfg)
     pending = [e for e in entries if signature(e) not in running]
+    chosen: Any
     if start_all:
         chosen = pending
     else:
         while True:
             progs = dict(load_programs(), **(overrides or {}))
-            labels = ", ".join(f"{SLOT_LABEL[s]} -> {program_label(progs.get(s))}"
-                               for s in SLOT_LABEL)
+            labels = ", ".join(f"{label} -> {program_label(progs.get(s))}"
+                               for s, label in SLOT_LABEL.items())
             info = [_snap_info(path, data), f"Inhalt: {_counts(entries)}",
                     f"Bereits laufend (werden standardmaessig nicht erneut gestartet): "
                     f"{len(entries) - len(pending)}",
@@ -3726,9 +3791,10 @@ def _report_protected(protected: list) -> None:
 
 def cmd_kill(cfg, spec: str | None, kill_all: bool, force: bool, timeout: float | None,
              dry_run: bool, relaunch: bool = True) -> int:
+    """Command 'kill': terminate the recorded programs that still run."""
     path = pick_snapshot(spec)
     data = _load_or_report(path) if path else None
-    if data is None:
+    if path is None or data is None:
         return 1
     targets, protected = kill_targets(cfg, data.get("entries", []))
     _report_protected(protected)
@@ -3762,6 +3828,7 @@ def cmd_kill(cfg, spec: str | None, kill_all: bool, force: bool, timeout: float 
 
 
 def cmd_list() -> int:
+    """Command 'list': all snapshots, newest first."""
     snaps = list_snapshots()
     if not snaps:
         print(f"Keine Snapshots in {SNAP_DIR}")
@@ -3813,9 +3880,10 @@ def cmd_manage(ask=None, read=None) -> int:
 
 
 def cmd_show(spec: str | None) -> int:
+    """Command 'show': content of one snapshot."""
     path = pick_snapshot(spec)
     data = _load_or_report(path) if path else None
-    if data is None:
+    if path is None or data is None:
         return 1
     print(f"# {path}\n# erstellt {data.get('created')}  "
           f"Sitzung {data.get('session_type')}/{data.get('desktop')}")
@@ -3858,8 +3926,8 @@ def cmd_programs(video: str | None, image: str | None, reset: bool) -> int:
     all_apps = desktop_apps(include_hidden=True)
     apps = desktop_apps()
     print(f"Einstellungen ({PROGRAMS_FILE}):")
-    for slot in SLOT_LABEL:
-        print(f"  {SLOT_LABEL[slot]:<7} {program_label(progs.get(slot), all_apps)}")
+    for slot, label in SLOT_LABEL.items():
+        print(f"  {label:<7} {program_label(progs.get(slot), all_apps)}")
     for slot, mimes in SLOT_FALLBACK_MIMES.items():
         print(f"\nInstallierte Programme fuer {SLOT_LABEL[slot]} ({', '.join(mimes)}):")
         for app, n in handlers_for(mimes, apps):
@@ -3879,12 +3947,12 @@ def cmd_diagnose(cfg) -> int:
     open or in its arguments. The output is meant to be copied into a bug report."""
     procs = scan_processes()
     entries = build_entries(cfg, procs)
-    by_pid = {}
+    by_pid: dict = {}
     for e in entries:
         by_pid.setdefault(e["pid"], []).append(e)
     desk = desktop_exec_names()
     ids = {a["id"] for a in desktop_apps(include_hidden=True)}
-    known = (cfg["video_players"] | cfg["image_viewers"] | BROWSER_NAMES)
+    known = cfg["video_players"] | cfg["image_viewers"] | BROWSER_NAMES
     n = 0
     print(f"session-snap {VERSION} diagnose - Sitzung {os.environ.get('XDG_SESSION_TYPE', '?')}"
           f"/{os.environ.get('XDG_CURRENT_DESKTOP', '?')}")
@@ -3905,7 +3973,7 @@ def cmd_diagnose(cfg) -> int:
     for key in ("color-scheme", "gtk-theme"):
         try:
             r = subprocess.run(["gsettings", "get", "org.gnome.desktop.interface", key],
-                               capture_output=True, text=True, timeout=5)
+                               capture_output=True, text=True, timeout=5, check=False)
             val = r.stdout.strip() or r.stderr.strip()
         except (OSError, subprocess.TimeoutExpired) as exc:
             val = f"nicht abfragbar ({exc.__class__.__name__})"
@@ -3948,9 +4016,9 @@ def cmd_diagnose(cfg) -> int:
             why = f"Kindprozess von PID {q.ppid} mit gleichem Programm"
         elif _match_any(q.names, cfg["exclude"]):
             why = "passt auf ein exclude-Muster"
-        elif not (q.names - GENERIC_NAMES):
+        elif not q.names - GENERIC_NAMES:
             why = "Interpreter/Starter ohne eigenen Programmnamen"
-        elif not (q.names & desk):
+        elif not q.names & desk:
             why = "kein sichtbarer .desktop-Eintrag (include/video_players/image_viewers)"
         else:
             why = "keine Regel trifft zu"
@@ -3961,6 +4029,7 @@ def cmd_diagnose(cfg) -> int:
 
 
 def cmd_config() -> int:
+    """Command 'config': write the configuration template (never overwrites)."""
     if CONFIG_FILE.exists():
         print(f"Konfiguration existiert bereits: {CONFIG_FILE}")
         return 0
@@ -3970,7 +4039,8 @@ def cmd_config() -> int:
     return 0
 
 
-def interactive(cfg) -> int:
+def interactive_menu(cfg) -> int:
+    """Main menu shown when session-snap is started without a command."""
     while True:
         snaps = list_snapshots()
         idx = menu("Hauptmenue",
@@ -4012,6 +4082,7 @@ DASH_ALIASES = {"--save": "save", "--restore": "restore", "--kill": "kill", "-k"
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Command line parser."""
     ap = argparse.ArgumentParser(
         prog="session-snap",
         description="Offene Programme (Videos, Bilder, Browser, Sonstige) protokollieren, "
@@ -4074,7 +4145,8 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def main(argv: list | None = None) -> int:
+def main(argv: list | None = None) -> int:  # pylint: disable=too-many-return-statements
+    """Entry point: parse the command line and run the command; returns the exit code."""
     argv_in = argv
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in DASH_ALIASES:
@@ -4131,7 +4203,7 @@ def main(argv: list | None = None) -> int:
             return cmd_show(a.snapshot)
         if a.cmd == "config":
             return cmd_config()
-        return interactive(cfg)
+        return interactive_menu(cfg)
     except KeyboardInterrupt:
         print("\nAbgebrochen.")
         return 130

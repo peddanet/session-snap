@@ -1,0 +1,166 @@
+# Changelog
+
+All notable changes of session-snap. Dates are those of the delivery; versions before 1.8.0
+were delivered as single files and imported into the repository afterwards (see
+[CONTRIBUTING.md](CONTRIBUTING.md#history)). The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.8.0] - 2026-11-13
+
+### Added
+
+- Public repository with the history of the available versions as tagged commits,
+  branches `main` and `develop`.
+- Quality gates in `tools/check.sh`: privacy, format (100 characters), pylint 10.00/10, mypy,
+  bandit, tests with branch coverage (floor 60 %, measured 64 %); pre-push hook
+  `tools/hooks/pre-push`; GitHub Actions workflow with Python 3.12.
+- `docs/user.md`, `docs/developer.md`, `docs/glossary.md`, `CONTRIBUTING.md`, this changelog.
+- `examples/demo-snapshot.json` and `examples/make_demo_media.py` (Lorem-ipsum images, test
+  videos, localised snapshot).
+
+### Changed
+
+- English docstrings for every function and class; type annotations where mypy needed them.
+- Internal renames without change in behaviour: `interactive()` → `interactive_menu()`,
+  `_Wl._send()` → `_Wl.send()`.
+- Test data contain no personal names (browser profiles *Lorem*, *Ipsum*).
+
+### Unchanged
+
+- Behaviour, command line, file formats; 67 tests.
+
+## [1.7.11] - 2026-11-02
+
+- Documentation of the same version installed with the program (or reported missing)
+- 67 tests
+
+## [1.7.10] - 2026-11-01
+
+- Complete paths in the tree selection
+- Documentation and primer updated
+
+## [1.7.9] - 2026-11-01
+
+- Browser session restore (Chrome, Firefox)
+- 66 tests
+
+## [1.7.8] - 2026-11-01
+
+- Chrome identity without `--profile-directory`
+- 64 tests
+
+## [1.7.7] - 2026-11-01
+
+- Snapshot management (`manage`)
+- 63 tests
+
+## [1.7.6] - 2026-11-01
+
+- Tree selection for restore
+- Nomacs `--fullscreen`
+- Background browser not "running"
+- 62 tests
+
+## [1.7.5] - 2026-11-01
+
+- App windows via window list
+- Better window matching
+- SIGKILL without question for players/viewers
+- Busy overlay
+- 61 tests
+
+## [1.7.4] - 2026-11-01
+
+- Eog `--fullscreen`
+- 58 tests
+
+## [1.7.3] - 2026-11-01
+
+- Restore menu "n von m – x laufen bereits"
+- 57 tests
+
+## [1.7.2] - 2026-11-01
+
+- Unique version number (same content as the last 1.7.1 delivery)
+
+## [1.7.1] - 2026-11-01
+
+- VLC endless loop
+- Images fullscreen
+- Defects #20, #21
+- Tree selection for terminate
+- 56 tests
+
+## [1.7.0] - 2026-10-28
+
+- Alt-Tab order: background process `session-snap watch` with autostart, positions in snapshots, rebuild on restore with choice and fallback
+- 52 tests
+
+## [1.6.1] - 2026-10-28
+
+- Appearance taken from the desktop session (follows light/dark)
+- 50 tests
+
+## [1.6.0] - 2026-10-28
+
+- Everything in `~/scripts` (`session-snap`, `test_session_snap`, `session-snap.d/`)
+- `--install` with migration
+- Update at start and `--update`
+- 49 tests
+
+## [1.5.1] - 2026-10-28
+
+- Appearance variables recorded and replayed
+- 46 tests
+
+## [1.5.0] - 2026-10-26
+
+- All images of single-instance viewers from window titles
+- VLC one window per video
+- Windows and appearance variables in `diagnose`
+- 45 tests
+
+## [1.4.0] - 2026-10-20
+
+- Uniform maximizing through COSMIC, built-in Wayland client, simulated compositor, 41 tests
+
+## [1.3.0] - 2026-10-20
+
+- Restart with original options, paused start, origin of a process, `diagnose`, 38 tests (intermediate delivery)
+
+## [1.2.0] - 2026-10-15
+
+- Browser category with app-window relaunch, program choice for videos/images, program-independent signature, 33 tests
+
+## [1.1.0] - 2026-10-14
+
+- `kill`, storage rule, installer with idempotent `PATH` block, double-fork launch, 27 tests, documentation
+
+## [1.0.0] - 2026-10-14
+
+- Capture (VLC, images, rest), snapshots, restore with checklist
+
+
+[1.8.0]: https://github.com/peddanet/session-snap/releases/tag/v1.8.0
+[1.7.11]: https://github.com/peddanet/session-snap/releases/tag/v1.7.11
+[1.7.10]: https://github.com/peddanet/session-snap/releases/tag/v1.7.10
+[1.7.9]: https://github.com/peddanet/session-snap/releases/tag/v1.7.9
+[1.7.8]: https://github.com/peddanet/session-snap/releases/tag/v1.7.8
+[1.7.7]: https://github.com/peddanet/session-snap/releases/tag/v1.7.7
+[1.7.6]: https://github.com/peddanet/session-snap/releases/tag/v1.7.6
+[1.7.5]: https://github.com/peddanet/session-snap/releases/tag/v1.7.5
+[1.7.4]: https://github.com/peddanet/session-snap/releases/tag/v1.7.4
+[1.7.3]: https://github.com/peddanet/session-snap/releases/tag/v1.7.3
+[1.7.2]: https://github.com/peddanet/session-snap/releases/tag/v1.7.2
+[1.7.1]: https://github.com/peddanet/session-snap/releases/tag/v1.7.1
+[1.7.0]: https://github.com/peddanet/session-snap/releases/tag/v1.7.0
+[1.6.1]: https://github.com/peddanet/session-snap/releases/tag/v1.6.1
+[1.6.0]: https://github.com/peddanet/session-snap/releases/tag/v1.6.0
+[1.5.1]: https://github.com/peddanet/session-snap/releases/tag/v1.5.1
+[1.5.0]: https://github.com/peddanet/session-snap/releases/tag/v1.5.0
+[1.4.0]: https://github.com/peddanet/session-snap/releases/tag/v1.4.0
+[1.3.0]: https://github.com/peddanet/session-snap/releases/tag/v1.3.0
+[1.2.0]: https://github.com/peddanet/session-snap/releases/tag/v1.2.0
+[1.1.0]: https://github.com/peddanet/session-snap/releases/tag/v1.1.0
+[1.0.0]: https://github.com/peddanet/session-snap/releases/tag/v1.0.0
