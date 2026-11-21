@@ -62,7 +62,15 @@ VIDEOS = [("Lorem Clip 1.mkv", "testsrc2"), ("Ipsum Clip 2.mkv", "smptebars")]
 
 
 def text_rows(text: str, scale: int) -> list[list[bool]]:
-    """Bitmap of `text` (unknown characters become blanks), scaled by `scale`."""
+    """Render text with the built-in bitmap font.
+
+    Args:
+        text: Text in capital letters; unknown characters become blanks.
+        scale: Pixels per font dot.
+
+    Returns:
+        Rows of pixels, True where the text is.
+    """
     rows: list[list[bool]] = []
     for r in range(7):
         line: list[bool] = []
@@ -75,8 +83,16 @@ def text_rows(text: str, scale: int) -> list[list[bool]]:
     return rows
 
 
-def png(path: Path, text: str, colour: tuple[int, int, int], size=(800, 500)) -> None:
-    """Write an RGB PNG with `text` in white, centred on a `colour` background."""
+def png(path: Path, text: str, colour: tuple[int, int, int],
+        size: tuple[int, int] = (800, 500)) -> None:
+    """Write an RGB PNG with white text, centred on a coloured background.
+
+    Args:
+        path: Target file.
+        text: Text to draw.
+        colour: Background colour (red, green, blue).
+        size: Width and height in pixels.
+    """
     w, h = size
     bitmap = text_rows(text.upper(), 8)
     bh, bw = len(bitmap), len(bitmap[0])
@@ -90,6 +106,15 @@ def png(path: Path, text: str, colour: tuple[int, int, int], size=(800, 500)) ->
             raw += bytes((255, 255, 255)) if on else bytes(colour)
 
     def chunk(kind: bytes, data: bytes) -> bytes:
+        """Build one PNG chunk.
+
+        Args:
+            kind: Chunk type, e.g. b"IHDR".
+            data: Chunk data.
+
+        Returns:
+            Length, type, data and CRC.
+        """
         body = kind + data
         return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
 
@@ -99,7 +124,15 @@ def png(path: Path, text: str, colour: tuple[int, int, int], size=(800, 500)) ->
 
 
 def video(path: Path, source: str) -> bool:
-    """Five-second test video from an ffmpeg test source; False if ffmpeg is missing."""
+    """Write a five-second test video from an ffmpeg test source.
+
+    Args:
+        path: Target file.
+        source: Name of the ffmpeg lavfi source, e.g. "testsrc2".
+
+    Returns:
+        True if the video was written, False if ffmpeg is missing or failed.
+    """
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return False
@@ -109,7 +142,11 @@ def video(path: Path, source: str) -> bool:
 
 
 def main() -> int:
-    """Create the media and the localised snapshot."""
+    """Create the media and the localised snapshot.
+
+    Returns:
+        Exit code.
+    """
     target = Path(sys.argv[1]).expanduser().resolve() if len(sys.argv) > 1 \
         else HERE / "demo-media"
     (target / "Bilder").mkdir(parents=True, exist_ok=True)

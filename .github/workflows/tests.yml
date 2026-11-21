@@ -1,0 +1,62 @@
+name: quality-gates
+
+# Branching model (see CONTRIBUTING.md):
+#   feature/*  -> pull request into develop
+#   develop    -> integration; release merge into main
+#   main       -> releases only, every release is an annotated tag vX.Y.Z
+#
+# Which event runs what (see docs/developer.md, "CI runs"):
+#   pull_request into main/develop  gates on the merge result; required check
+#   push of a tag v*                 release-check only: the tagged merge commit has
+#                                    the tree its pull request already tested
+#                                    (branch protection: strict), so the gates
+#                                    would only repeat that run
+# Python versions: the oldest supported (requires-python) and the newest; the
+# pre-push hook on the developer's PC covers the version in between.
+# Branch pushes start no run: work branches are checked through their pull
+# request, and a merge into main/develop has the tree its pull request
+# already tested (branch protection: strict, no direct pushes).
+# A branch without a pull request: gh workflow run quality-gates --ref BRANCH
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  gates:
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip                          # pip downloads, keyed on pyproject.toml
+          cache-dependency-path: pyproject.toml
+      - name: system tools
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: python tools
+        run: pip install -e ".[dev]"
+      - name: quality gates (format, lint, types, security, tests)
+        run: tools/check.sh
+
+  release-check:
+    # A tag must point to a commit on main and match __version__.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: tag is on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: tag matches version
+        run: |
+          v=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/session_snap/__init__.py)
+          test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != v$v"; exit 1; }

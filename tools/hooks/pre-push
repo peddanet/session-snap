@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# Git pre-push hook of session-snap: all quality gates must pass before anything is pushed.
-# Activate once per clone (normal user):  git config core.hooksPath tools/hooks
-# Bypass in an emergency:                 git push --no-verify
-exec "$(git rev-parse --show-toplevel)/tools/check.sh"
