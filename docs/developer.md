@@ -1,6 +1,6 @@
 # session-snap — Developer Guide
 
-> Version 1.8.0. Generated from the documentation source; the PDF edition (with rendered figures, index and the complete source listing) and its Markdown source are attached to every [GitHub release](https://github.com/peddanet/session-snap/releases). Terms are explained in the [glossary](glossary.md).
+> Version 2.0.0. The terminal captures were recorded with 1.8.0 and still show its paths below `~/scripts/session-snap.d`; since 2.0.0 the files are in the XDG folders (see Installation). Generated from the documentation source; the PDF edition (with rendered figures, index and the complete source listing) and its Markdown source are attached to every [GitHub release](https://github.com/peddanet/session-snap/releases). Terms are explained in the [glossary](glossary.md).
 
 <a id="sec-platform"></a>
 
@@ -76,7 +76,7 @@ flowchart TB
     SCAN -. reads .-> PROC[("/proc")]
     CLI --> UPD["Install / migrate / update<br/>migrate() · auto_update()"]
     UPD -. reads .-> DL[("download folders")]
-    STORE -. writes .-> DIR[("~/scripts/session-snap.d/")]
+    STORE -. writes .-> DIR[("~/.local/state/session-snap/")]
     LAUNCH -. "fork + setsid + exec" .-> RUN[["Desktop programs"]]
     TERM -. "signals" .-> RUN
 ```
@@ -89,7 +89,7 @@ Table: Function reference by section.
 
 | Section | Functions and classes | Responsibility |
 |--------------|----------------------------------------|----------------------|
-| paths | `init_paths()` | `~/scripts` layout, `SESSION_SNAP_DIR` override |
+| paths | `init_paths()`, `migrate_layout()` | XDG layout, `SESSION_SNAP_DIR` override, one-time move of the 1.8.0 layout |
 | helpers | `check_not_root()`, `setup_logging()`, `load_config()`, `parse_maximize()` | guards, log, configuration (incl. `fullscreen`, `overlay`, `browser_session`) |
 | /proc scan | `Proc`, `read_stat()`, `scan_processes()`, `argv_files()`, `argv_file_args()`, `file_cmd()`, `_read_environ()`, `launched_from()`, `fd_files()`, `desktop_exec_names()` | raw process data, exact restart command, origin |
 | applications | `desktop_apps()`, `exec_tokens()`, `app_flag()`, `app_launch()`, `browser_family()`, `browser_app_windows()`, `app_window_entries()`, `desktop_aliases()`, `mime_of()`, `handlers_for()`, `load_programs()`, `save_programs()`, `program_cmd()`, `apply_programs()`, `player_of()`, `apply_player_options()` | desktop entries, MIME, program choice, start options |
@@ -444,15 +444,13 @@ flowchart TB
 
 <a id="sec-alg-update"></a>
 
-## Install, migration and update
+## Installation, layout move and update
 
-* **Paths.** `init_paths()` derives everything from `Path.home() / "scripts"`; `SESSION_SNAP_DIR` overrides only the data folder (used by the tests).
-* **When the migration runs.** `main()` calls `migrate()` only for a real command line (not from the tests) and only if the running file lies in `~/scripts`; `--install` always calls it. `migrate()` reads the program text first, because it may move the running file.
-* **Static version.** `static_version()` searches the first 400 kB of a file for `^VERSION = "…"`; `vkey()` turns `1.7.0` into `(1, 7, 0)` for comparison.
-* **Download folders.** `download_dirs()` reads `XDG_DOWNLOAD_DIR` from `~/.config/user-dirs.dirs`, adds `~/Downloads`, the `download.default_directory` of every Chrome-family `Preferences` file and the `browser.download.dir` of every Firefox `prefs.js` (also Snap and Flatpak locations), resolves links and keeps existing folders once.
-* **Installation of a file.** `_install_file()` backs up a different existing target with `backup_file()`, copies the new file to a temporary name, sets mode 0755 and renames it over the target with `os.replace` — atomic: a running instance keeps the old file content.
-* **Documentation of the same version.** `install_docs()` looks for `session-snap-documentation` and `session-snap-primer` (`.md`, `.pdf`, also with ` (3)` etc.) next to the program and in the download folders. `doc_version()` reads the version from the Markdown line `title: "session-snap X"`, and from a PDF via `_pdf_title()`: the title of the document information, which XeLaTeX writes into a zlib-compressed object stream as UTF-16 hex string. Per file the newest matching copy is taken.
-* **Restart after an update.** `auto_update()` sets `SESSION_SNAP_UPDATED=1` (no second question in the new process) and replaces the process with `os.execv(program, [program] + argv)`. If the background process runs, `install_version()` restarts it with the new version.
+* **Paths.** `init_paths()` derives the configuration, state and data folders from `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `XDG_DATA_HOME` (absolute values only, else the defaults); `SESSION_SNAP_DIR` puts everything into one folder (tests, and it disables the layout move).
+* **Layout move.** `main()` calls `migrate_layout()` before every command. If `~/scripts/session-snap.d` exists, `stop_old_watcher()` first ends a watcher of the old version that still holds `watch.lock` there (only if `/proc/<pid>/cmdline` names `session-snap` and `watch`), then every file is moved with `_move_safe()`, which never overwrites: an identical target removes the source, a different one gets a time stamp.
+* **install.sh** installs a tag with `pip install "session-snap @ git+<repo>@<tag>"` into the venv, checks `--version` against the tag, links `~/.local/bin/session-snap`, moves the two old program files out of `~/scripts` and rewrites the autostart entry (only lines naming the old program).
+* **update.** `session-snap update` runs `src/session_snap/update/apply-release.sh` of the installed package with the version and venv of the running program (`ReleaseUpdater`); the script is the reference implementation of mediatools 1.14.1 with the names replaced.
+* **reload.** `cmd_reload()` writes `watch.restart` and waits for `watch.answer`; `check_reload()` runs in `watch_once()` after every event (the order of that event is already stored), probes the installed release with `WatchRestart.installed_version()` and replaces the process with `os.execv(python, [python, "-m", "session_snap", "watch"])`.
 
 <a id="sec-window"></a>
 
@@ -573,7 +571,7 @@ sequenceDiagram
 
 # Storage and logging
 
-The data folder is `~/scripts/session-snap.d/`; it can be overridden with `SESSION_SNAP_DIR` ([layout](user.md#sec-layout)).
+The data live in the XDG folders `~/.config/session-snap/` and `~/.local/state/session-snap/`; `SESSION_SNAP_DIR` puts everything into one folder ([layout](user.md#sec-layout)).
 
 * Snapshot names follow `session-snap_YYYY-MM-DD_HH-MM-SS.json` in `snapshots/`; lexical order equals chronological order. A second capture within the same second receives `_1`, `_2`, … (test T04).
 * Snapshots, `programs.ini`, `order.json` and installed programs are written [atomically](glossary.md#gl-atomic) (temporary file + `os.replace()`).
@@ -610,59 +608,41 @@ flowchart LR
 
 ## Running the tests
 
-The test program loads the program next to it (`session-snap`; the explicit loader is needed because the file has no `.py` extension). Run as the normal user:
+The tests are pytest modules in `tests/` (the program tests are `unittest.TestCase` classes, which pytest runs as well). Run them as the normal user in the clone; `tools/check.sh` runs them with branch coverage:
 
 ```bash
-test_session_snap
+cd ~/Projects/session-snap && .venv/bin/python -m pytest -q
 ```
 
-Verbose, or against another copy:
-
-```bash
-python3 ~/scripts/test_session_snap -v
-SESSION_SNAP_SCRIPT=~/Downloads/session-snap python3 ~/scripts/test_session_snap
-```
+Processes started with `python -m session_snap` (restore and kill through a pseudo-terminal, the layout move) are measured too: `[tool.coverage.run] patch = ["subprocess"]` in `pyproject.toml`.
 
 <a id="sec-gates"></a>
 
 ## Quality gates
 
-Since 1.8.0 every commit that is pushed must pass six gates. `tools/check.sh` runs them in this order; the configuration of the tools is in `pyproject.toml`, their versions are pinned in `tools/requirements-check.txt`.
+Every push must pass the seven gates of the dev-conventions. `tools/check.sh` runs them locally, the pre-push hook `.githooks/pre-push` runs it before every push, and GitHub Actions runs it for every pull request with Python 3.12 and 3.14 (`.github/workflows/tests.yml`).
 
 Table: Quality gates.
 
 | Gate | Tool | Criterion |
 |------|------|-----------|
-| privacy | `grep` over all tracked files | no home directory other than the placeholders `/home/USER`, `/home/tester`, `/home/snaptest`; no e-mail address other than noreply/example addresses; no telephone number; no word from the untracked file `.privacy-patterns` |
-| format | `awk` | at most 100 characters per line, no tab, no trailing white space |
-| lint | pylint | 10.00/10; every disabled message is justified in a comment at the place where it is disabled |
-| types | mypy | no finding |
-| security | bandit | no finding; four checks are skipped globally (start of the user's programs with argument lists, never through a shell), four findings are marked `# nosec` with the reason on the same line |
-| tests | unittest + coverage | all 67 tests pass with `-W error::ResourceWarning`; branch coverage at least 60 % (1.8.0: 64 %) |
+| privacy | `tools/privacy_scan.py` | no term of the local deny list `~/.config/session-snap/privacy/denylist.txt` and no label of the user's own snapshots in any file of any commit, in any path, commit message or tag annotation of the whole history |
+| shell | shellcheck | no finding in `install.sh`, `tools/*.sh`, the hook and `apply-release.sh` |
+| format | pycodestyle | no finding, line length 100 |
+| lint | pylint with docparams | 10.00/10 incl. Google-style docstrings (Args, Returns, Yields, Raises) |
+| types | mypy | no error |
+| security | bandit | no finding; skipped checks and every `# nosec` are justified in place |
+| tests | pytest + coverage | all pass; branch coverage at least 90 % (2.0.0: 90.2 %) |
 
-Run all gates, or only some of them, as the normal user from the root of the clone:
+Set-up once per clone, as the normal user (only `shellcheck` and `python3-venv` need `sudo`, because apt writes to `/usr`):
 
 ```bash
+sudo apt install shellcheck python3-venv
+cd ~/Projects/session-snap && python3 -m venv .venv && .venv/bin/pip install -e '.[dev]' && git config core.hooksPath .githooks
 tools/check.sh
-tools/check.sh lint types
 ```
 
-The check tools are not part of Pop!_OS. They are installed in their pinned versions into a virtual environment inside the clone, `.venv-check/` (ignored by git), so that the system Python stays untouched. The tool itself never uses this environment. Once, as the normal user — only the package `python3-venv` needs `sudo`, because it changes the system:
-
-```bash
-sudo apt install python3-venv
-cd ~/Projects/session-snap
-python3 -m venv .venv-check
-.venv-check/bin/python -m pip install -r tools/requirements-check.txt
-```
-
-`check.sh` uses `.venv-check/bin/python` automatically when it exists; otherwise `python3`, or the interpreter named in the variable `PYTHON`.
-
-The same gates run on GitHub Actions for every push to `main` and `develop`, for every tag and for every pull request (`.github/workflows/check.yml`, Ubuntu 24.04, Python 3.12, which is the Python of Pop!_OS 24.04). Locally, the hook `tools/hooks/pre-push` runs them before every `git push`; it is activated once per clone:
-
-```bash
-git config core.hooksPath tools/hooks
-```
+`check.sh` activates `.venv` itself; `--fast` skips the tests while editing.
 
 **Should the tests be built into the tool?** No. A separate test program keeps the tool small; the tests can create temporary files, processes and homes without affecting the installed tool; and both are installed and updated together.
 
@@ -697,7 +677,7 @@ Table: Test catalogue. Result: PASS on Python 3.11, 3.12 and 3.13 (Ubuntu 24.04.
 | T23 | wrong start time means "already ended", no signal sent | R9 | PASS |
 | T24 | `save --kill -y`: snapshot written, then the saved programs terminated | R9 | PASS |
 | T25 | full cycle save → kill → restore yields the same signatures | R1–R9 | PASS |
-| T26 | `python3 ~/Downloads/'session-snap (4).py' --install` on a 1.5 layout: new layout, snapshots/log/config moved, backups never overwritten, link removed, `PATH` block exactly once (twice sourced), idempotent | R11, R12, R28, R30 | PASS |
+| T26 | `init_paths()`: XDG variables win if absolute, else defaults below HOME | R28 | PASS |
 | T27 | launch is detached (own session, not a child); exec errors and missing programs reported | R7 | PASS |
 | T28 | browsers: own category, restart keeps only the profile; Claude app window recorded with the launcher's Exec | R15, R16 | PASS |
 | T29 | Exec expansion: `%f`/`%U` replaced, other codes dropped, path appended if no code | R17 | PASS |
@@ -718,14 +698,16 @@ Table: Test catalogue. Result: PASS on Python 3.11, 3.12 and 3.13 (Ubuntu 24.04.
 | T44 | real process with inotify watch + simulated COSMIC: 1 file in argv, 5 windows → 5 images recorded and restored | R25 | PASS |
 | T45 | VLC default options contain `--no-one-instance-when-started-from-file` and `--input-repeat=65535`; template line | R26, R33 | PASS |
 | T46 | appearance variables recorded (never the whole environment) and set again on restore without session process | R27 | PASS |
-| T47 | `--update`: newest first, installed marked, test program of the same version installed, backup; downgrade only after `j` | R29, R30 | PASS |
-| T48 | update at start: nothing newer → silent; newer → question, install, re-exec; versions read from the source text, files never executed | R29 | PASS |
-| T49 | the test program carries the version of the program | R30 | PASS |
+| T27 | `migrate_layout()`: files move into the XDG layout; identical target removes the source, a different one is kept; idempotent | R28 | PASS |
+| T28 | a folder that cannot be emptied stays and is reported | R28 | PASS |
+| T29 | first start of 2.0.0 moves and reports; the PATH block stays and is mentioned | R12, R28 | PASS |
+| T30 | the watcher of 1.8.0 is ended before its lock moves - only a real `session-snap … watch` | R28 | PASS |
+| T31–T34 | `--install` explains install.sh; `update` runs the bundled script; reload request and answers; `reload` command | R29 | PASS |
 | T50 | restore follows the current desktop session (dark) although the snapshot recorded light | R27 | PASS |
 | T51 | background process follows activations (most recent last), writes `order.json`; liveness via lock | R31, R32 | PASS |
 | T52 | positions at save (background process and fallback); restore activates oldest first; unrelated windows untouched | R31, R32 | PASS |
 | T53 | defaults: images fullscreen, videos maximized, `fullscreen` wins; `set_fullscreen` without announced capability | R34 | PASS |
-| T54 | without graphical session `--install` and `watch --start` report "NICHT gestartet" with the reason | — (defect #20) | PASS |
+| T54 | without graphical session `watch --start` reports "NICHT gestartet" with the reason | — (defect #20) | PASS |
 | T55 | window title with a counter in the middle yields the file name | R25 (defect #21) | PASS |
 | T56 | interactive kill with the tree: root deselects all, category selected and unfolded, legend shown; only that category ends | R35 | PASS |
 | T57 | restore menu shows "n von m – x laufen bereits"; kill menu plain counts | R36 | PASS |
@@ -737,7 +719,7 @@ Table: Test catalogue. Result: PASS on Python 3.11, 3.12 and 3.13 (Ubuntu 24.04.
 | T63 | rename, archive, bring back, delete (after confirmation), also through the menu | R37 | PASS |
 | T64 | Chrome identity ignores `--profile-directory`; another `--user-data-dir` is another Chrome; kill ends a Chrome started through an app | R40 | PASS |
 | T65 | Chrome profiles from `Local State`; restore command without `--profile-directory`, with `--restore-last-session`; app window opened by the session not started twice | R41 | PASS |
-| T67 | documentation and primer of the installed version copied to `docs/`; version from the Markdown title and from a compressed UTF-16 PDF title; other versions ignored; missing file reported; second run "unveraendert" | R43 | PASS |
+| T80–T86 | 2.0.0: kill compares with the live state, shows side effects, keeps browsers unless confirmed; window list retried; capture warning | R14 (defect #28) | PASS |
 | T66 | Firefox profile from the open `.parentlock`; `prefs.js` untouched while running; afterwards `resume_session_once` set once, other prefs kept, backup | R41 | PASS |
 
 Static checks: `pyflakes` [[pyflakes]](#ref-pyflakes) reports no findings for the tool or the test suite.
@@ -797,205 +779,169 @@ Table: Defects found and fixed, and design changes, over all versions.
 | 25 | ≤ 1.7.5 | A Chrome running in the background without a window counted as "already running" (reported by the user). | Browsers count only with a window (1.7.6). Test T62. |
 | 26 | ≤ 1.7.7 | `kill` did not end a Chrome started through an app when the snapshot came from a plain Chrome start (`ps` on the target system). | Chrome identity = family + user data directory (1.7.8). Test T64. |
 | 27 | 1.7.1 | The tree selection wrapped paths for the full width although entries are indented; the end of long paths was cut off (found in the captures for this document). | Wrapped to the indented width (1.7.10). Test T18 checks every word of a long path. |
+| 28 | ≤ 1.8.0 | Under heavy load (a video encode on all cores) the window list of the compositor did not answer within 2 s; single-instance viewers then looked as if they showed only their first image ("Nur Bilder (2)" with 17 images open), and "Beenden" did not compare the snapshot with what was open (reported by the user, 21 Nov 2026). | Window list retried with 6 s, visible warning and question before saving an incomplete capture; kill compares with the live state, shows side effects and keeps browsers unless confirmed; menu choice logged (2.0.0). Tests T80–T86. |
 
 ## Full test output
 
-The repeated module path in parentheses after each test name was removed to fit the page width; output written by the tests themselves (test T48) appears in between. Otherwise the output is unchanged.
+Output of `python3 -m pytest -v` for 2.0.0 (Python 3.12, normal user); the folder prefix `tests/` and the progress percentages were removed to fit the page width.
 
 ```text
-test_26_install_from_downloads_with_migration
-python3 ~/Downloads/'session-snap (4).py' --install: new layout, migration, ... ok
-test_47_update_list_and_downgrade
---update: newest first, installed version marked, test program of the same ... ok
-test_48_update_at_start
-start: nothing newer -> silent; newer -> question, install, restart (re-exec); ... Neuere Version 7.0.0 gefunden: /tmp/ssnap-home-9bq6u4js/Downloads/session-snap  (installiert: 1.8.0)
-/tmp/ssnap-home-9bq6u4js/scripts/session-snap: installiert (7.0.0)
-Testprogramm 7.0.0 nicht im Download-Ordner - Testprogramm unveraendert
-session-snap-documentation.md zu Version 7.0.0 NICHT gefunden - bitte erzeugen bzw. herunterladen
-session-snap-documentation.pdf zu Version 7.0.0 NICHT gefunden - bitte erzeugen bzw. herunterladen
-session-snap-primer.md zu Version 7.0.0 NICHT gefunden - bitte erzeugen bzw. herunterladen
-session-snap-primer.pdf zu Version 7.0.0 NICHT gefunden - bitte erzeugen bzw. herunterladen
-Starte session-snap 7.0.0 ...
-ok
-test_49_test_version_matches
-the test program carries the version of the program it belongs to ... ok
-test_54_watch_not_started_without_session
-Fehler #20: without a graphical session --install and watch --start say that the ... ok
-test_01_argv_files
-argv parsing: relative, absolute, file:// URI, options/URLs/missing skipped ... ok
-test_02_desktop_names
-.desktop parsing: env prefix resolved, NoDisplay excluded, interpreters ignored ... ok
-test_03_signature_pid_independent
-signature(): identical for the same program/file under a different PID ... ok
-test_04_naming_rule_and_order
-file naming rule session-snap_DATE_TIME.json, same-second suffix, newest first ... ok
-test_05_roundtrip_umlaut_and_non_utf8
-snapshot round trip keeps umlauts and non-UTF-8 file names byte-exact ... ok
-test_06_config
-config.ini: overrides applied, invalid number ignored, broken file -> defaults ... ok
-test_07_key_decoding
-_getkey(): ESC[B and ESC O B -> down, ESC[6~ -> PgDn, lone Esc -> 27, junk -> -1 ... ok
-test_08_cli_aliases
-CLI: '--kill' / '-k' map to the kill subcommand with all options ... ok
-test_09_protected_chain
-protected_pids(): contains this process and its parent ... ok
-test_10_root_guard
-check_not_root(): exits when the effective UID is 0 ... ok
-test_57_restore_menu_counts
-restore menu: 'n von m' per category plus how many are already running; ... ok
-test_58_eog_fullscreen_option
-images in 'fullscreen': eog is started with its own --fullscreen; videos are not ... ok
-test_59_overlay_notification_and_cancel
-busy overlay: Notify with button 'Abbrechen' (critical, never expires), text ... ok
-test_63_manage_snapshots
-rename keeps the file name and sets the label; archive hides a snapshot from the ... ok
-test_67_install_docs_of_same_version
-documentation and primer (.md, .pdf) of the installed version are copied to docs/; ... ok
-test_11_classification
-capture: VLC via open fd, images via args/URI, rest via .desktop, hidden excluded ... ok
+test_apply_release.py::test_list_shows_releases_archives_and_leftovers PASSED
+test_apply_release.py::test_feature_archive_is_released_without_questions PASSED
+test_apply_release.py::test_merge_only_archives_chain_until_the_release PASSED
+test_apply_release.py::test_question_declined_keeps_the_archive PASSED
+test_apply_release.py::test_wrong_base_stops_before_any_change PASSED
+test_apply_release.py::test_patch_that_does_not_apply_leaves_a_clean_clone PASSED
+test_apply_release.py::test_newer_release_is_installed_first PASSED
+test_apply_release.py::test_help_and_unknown_option PASSED
+test_apply_release.py::test_inherited_variables_never_delete_the_script PASSED
+test_apply_release.py::test_control_variables_are_not_exported PASSED
+test_apply_release.py::test_update_subcommand_forwards_options PASSED
+test_release_tools.py::test_feature_not_merged_without_yes PASSED
+test_release_tools.py::test_feature_merged_through_pull_request PASSED
+test_release_tools.py::test_merge_only_with_yes PASSED
+test_release_tools.py::test_feature_then_release_and_install PASSED
+test_release_tools.py::test_develop_non_interactive[args0-v1.1.1] PASSED
+test_release_tools.py::test_develop_non_interactive[args1-v2.0.0] PASSED
+test_release_tools.py::test_develop_non_interactive[args2-v1.2.0] PASSED
+test_release_tools.py::test_feature_with_part_from_update PASSED
+test_release_tools.py::test_release_declined_keeps_everything_local PASSED
+test_release_tools.py::test_hotfix_while_develop_collects PASSED
+test_release_tools.py::test_hotfix_conflict_with_develop PASSED
+test_release_tools.py::test_red_checks_merge_nothing PASSED
+test_release_tools.py::test_failed_tag_check_is_reported PASSED
+test_release_tools.py::test_hotfix_refusals PASSED
+test_release_tools.py::test_release_refusals PASSED
+test_release_tools.py::test_empty_message_refused PASSED
+test_release_tools.py::test_gates_run_before_anything_is_pushed PASSED
+test_release_tools.py::test_rebase_conflict_changes_nothing PASSED
+test_release_tools.py::test_same_code_yes_no PASSED
+test_selfrestart.py::test_command_drops_markers_and_old_log PASSED
+test_selfrestart.py::test_installed_version_answers PASSED
+test_selfrestart.py::test_installed_version_rejects[broken-0] PASSED
+test_selfrestart.py::test_installed_version_rejects[demo 1.3.0-1] PASSED
+test_selfrestart.py::test_missing_release_and_failing_exec PASSED
+test_selfrestart.py::test_default_interpreter_is_running_one PASSED
+test_session_snap.py::T1_Unit::test_01_argv_files PASSED
+test_session_snap.py::T1_Unit::test_02_desktop_names PASSED
+test_session_snap.py::T1_Unit::test_03_signature_pid_independent PASSED
+test_session_snap.py::T1_Unit::test_04_naming_rule_and_order PASSED
+test_session_snap.py::T1_Unit::test_05_roundtrip_umlaut_and_non_utf8 PASSED
+test_session_snap.py::T1_Unit::test_06_config PASSED
+test_session_snap.py::T1_Unit::test_07_key_decoding PASSED
+test_session_snap.py::T1_Unit::test_08_cli_aliases PASSED
+test_session_snap.py::T1_Unit::test_09_protected_chain PASSED
+test_session_snap.py::T1_Unit::test_10_root_guard PASSED
+test_session_snap.py::T1_Unit::test_57_restore_menu_counts PASSED
+test_session_snap.py::T1_Unit::test_58_eog_fullscreen_option PASSED
+test_session_snap.py::T1_Unit::test_59_overlay_notification_and_cancel PASSED
+test_session_snap.py::T1_Unit::test_63_manage_snapshots PASSED
 ```
 
 ```text
-test_12_child_processes_collapsed
-capture: a child process with the same binary is not recorded separately ... ok
-test_13_save_cli
-save -y -l LABEL: snapshot file with label and all four entries ... ok
-test_14_restore_all
-restore --all: every entry restarted, identical signatures afterwards ... ok
-test_15_restore_skips_running
-restore --all twice: second run starts nothing (already running) ... ok
-test_16_restore_missing_file
-restore with a deleted file: reported, exit code 1, the others still start ... ok
-test_17_restore_dry_run
-restore --dry-run: commands listed, nothing started ... ok
-test_18_checklist_via_pty
-interactive restore, 'Auswahl treffen' (same tree as kill): n = all off, Down to ... ok
-test_27_detached_launch
-launch: program runs in its own session, is no child of the caller; exec errors ... ok
-test_19_kill_all
-kill --all: every recorded process ends with SIGTERM, exit code 0 ... ok
-test_20_kill_dry_run
-kill --dry-run: nothing is signalled ... ok
-test_21_kill_unresponsive
-SIGTERM ignored by a normal program: without --force exit 1 and alive; with ... ok
-test_22_kill_protects_own_chain
-a process in the caller's own process chain is reported, never signalled ... ok
-test_23_pid_reuse_guard
-PID identity: a wrong start time means 'already ended' - no signal is sent ... ok
-test_24_save_then_kill
-save --kill -y: snapshot written, then the saved programs are terminated ... ok
-test_25_kill_then_restore_cycle
-full cycle: save -> kill -> restore yields the same signatures again ... ok
-test_56_kill_checklist_folded_categories
-interactive kill, 'Auswahl treffen': tree with root 'Alle Programme', categories ... ok
-test_28_browser_capture
-browsers: own category, restart command keeps only the profile; app window ... ok
-test_29_exec_tokens
-desktop Exec expansion: %f/%U replaced, other codes dropped, path appended if ... ok
-test_30_kill_relaunches_app
-kill: Chrome ends although the app window (Claude) was not selected; the app is ... ok
-test_31_programs_cli
-programs: lists installed handlers per type, saves and resets the choice ... ok
-test_32_restore_with_other_program
-restore --video/--image: files open in the chosen programs; a second restore ... ok
-test_33_saved_program_and_unknown_program
-saved choice in programs.ini is used; an unknown desktop ID falls back to the ... ok
-test_60_app_window_found_through_window_list
-Claude opened in an ALREADY running Chrome: the process has no --app-id, the app ... ok
-test_61_window_names_for_order
-Alt-Tab order: windows are found under their desktop ID (fake.desktop for ... ok
-test_62_background_browser_not_running
-a browser process WITHOUT window (Chrome in the background) does not count as ... ok
+test_session_snap.py::T2_Capture::test_11_classification PASSED
+test_session_snap.py::T2_Capture::test_12_child_processes_collapsed PASSED
+test_session_snap.py::T2_Capture::test_13_save_cli PASSED
+test_session_snap.py::T3_Restore::test_14_restore_all PASSED
+test_session_snap.py::T3_Restore::test_15_restore_skips_running PASSED
+test_session_snap.py::T3_Restore::test_16_restore_missing_file PASSED
+test_session_snap.py::T3_Restore::test_17_restore_dry_run PASSED
+test_session_snap.py::T3_Restore::test_18_checklist_via_pty PASSED
+test_session_snap.py::T3_Restore::test_27_detached_launch PASSED
+test_session_snap.py::T4_Kill::test_19_kill_all PASSED
+test_session_snap.py::T4_Kill::test_20_kill_dry_run PASSED
+test_session_snap.py::T4_Kill::test_21_kill_unresponsive PASSED
+test_session_snap.py::T4_Kill::test_22_kill_protects_own_chain PASSED
+test_session_snap.py::T4_Kill::test_23_pid_reuse_guard PASSED
+test_session_snap.py::T4_Kill::test_24_save_then_kill PASSED
+test_session_snap.py::T4_Kill::test_25_kill_then_restore_cycle PASSED
+test_session_snap.py::T4_Kill::test_56_kill_checklist_folded_categories PASSED
+test_session_snap.py::T6_Browser_Programs::test_28_browser_capture PASSED
+test_session_snap.py::T6_Browser_Programs::test_29_exec_tokens PASSED
+test_session_snap.py::T6_Browser_Programs::test_30_kill_relaunches_app PASSED
+test_session_snap.py::T6_Browser_Programs::test_31_programs_cli PASSED
+test_session_snap.py::T6_Browser_Programs::test_32_restore_with_other_program PASSED
+test_session_snap.py::T6_Browser_Programs::test_33_saved_program_and_unknown_program PASSED
+test_session_snap.py::T6_Browser_Programs::test_60_app_window_found_through_window_list PASSED
+test_session_snap.py::T6_Browser_Programs::test_61_window_names_for_order PASSED
+test_session_snap.py::T6_Browser_Programs::test_62_background_browser_not_running PASSED
+test_session_snap.py::T6_Browser_Programs::test_64_chrome_identity_ignores_profile_flag PASSED
+test_session_snap.py::T6_Browser_Programs::test_65_chrome_session_restore PASSED
+test_session_snap.py::T6_Browser_Programs::test_66_firefox_session_restore PASSED
+test_session_snap.py::T7_Exact_Program::test_34_file_cmd PASSED
+test_session_snap.py::T7_Exact_Program::test_35_original_options_survive_cycle PASSED
+test_session_snap.py::T7_Exact_Program::test_36_player_options PASSED
+test_session_snap.py::T7_Exact_Program::test_37_launched_from PASSED
+test_session_snap.py::T7_Exact_Program::test_38_unreadable_xdg_dir_and_diagnose PASSED
+test_session_snap.py::T8_Maximize::test_39_parse_and_match PASSED
+test_session_snap.py::T8_Maximize::test_40_maximize_only_new_matching_windows PASSED
+test_session_snap.py::T8_Maximize::test_41_no_cosmic PASSED
+test_session_snap.py::T8_Maximize::test_51_watch_records_alt_tab_order PASSED
+test_session_snap.py::T8_Maximize::test_52_save_order_and_restore_reorder PASSED
+test_session_snap.py::T8_Maximize::test_53_fullscreen_images_maximize_videos PASSED
+test_session_snap.py::T9_Single_Instance::test_42_titles_and_recent PASSED
+test_session_snap.py::T9_Single_Instance::test_43_merge_window_files PASSED
+test_session_snap.py::T9_Single_Instance::test_44_eog_end_to_end PASSED
+test_session_snap.py::T9_Single_Instance::test_45_vlc_default_options PASSED
+test_session_snap.py::T9_Single_Instance::test_46_look_environment PASSED
+test_session_snap.py::T9_Single_Instance::test_50_system_theme_wins PASSED
+test_session_snap.py::T9_Single_Instance::test_55_title_counter_in_the_middle PASSED
+test_session_snap.py::T10_Layout_Update::test_26_xdg_paths PASSED
+test_session_snap.py::T10_Layout_Update::test_27_migrate_layout PASSED
+test_session_snap.py::T10_Layout_Update::test_28_migrate_keeps_foreign_files_visible PASSED
 ```
 
 ```text
-test_64_chrome_identity_ignores_profile_flag
-snapshot taken while Chrome ran as plain 'chrome'; now Chrome was started through ... ok
-test_65_chrome_session_restore
-save remembers the open Chrome profiles (Local State); restore starts Chrome ... ok
-test_66_firefox_session_restore
-the profile of a running Firefox is found through its open .parentlock; while it ... ok
-test_34_file_cmd
-file_cmd: original options and `--` kept, file/URL arguments replaced by the one ... ok
-test_35_original_options_survive_cycle
-capture -> kill -> restore: the restored process has exactly the original program ... ok
-test_36_player_options
-start options: inserted after the binary (or after `flatpak run APP`), not ... ok
-test_37_launched_from
-origin of a process: GIO_LAUNCHED_DESKTOP_FILE (GLib launchers) and systemd unit ... ok
-test_38_unreadable_xdg_dir_and_diagnose
-an unreadable XDG_DATA_DIRS entry is skipped (no crash); diagnose reports ... ok
-test_39_parse_and_match
-config 'maximize' parsing and app_id matching (mpv, vlc, org.gnome.eog, ... ok
-test_40_maximize_only_new_matching_windows
-WindowMaximizer: existing windows and foreign programs are left alone; new ... ok
-test_41_no_cosmic
-without the COSMIC globals or the maximize capability: clear error, no crash; ... ok
-test_51_watch_records_alt_tab_order
-session-snap watch follows activations (most recent last) and writes order.json; ... ok
-test_52_save_order_and_restore_reorder
-save assigns the Alt-Tab position to the entries (watcher: real order, else ... ok
-test_53_fullscreen_images_maximize_videos
-defaults: images fullscreen, videos maximized; 'fullscreen' wins over 'maximize'; ... ok
-test_42_titles_and_recent
-window title parsing; recently-used.xbel parsing (newest first, program names) ... ok
-test_43_merge_window_files
-add_window_files: one entry per window; closed window drops its file; two ... ok
-test_44_eog_end_to_end
-real process + inotify + fake COSMIC: eog with 1 file in argv and 5 windows is ... ok
-test_45_vlc_default_options
-VLC gets its own window per file (--no-one-instance-when-started-from-file) and ... ok
-test_46_look_environment
-appearance variables (dark theme etc.) of the original program are recorded and ... ok
-test_50_system_theme_wins
-restore follows the CURRENT desktop session (system theme), not the recorded ... ok
-test_55_title_counter_in_the_middle
-Fehler #21: a counter '(n/m)' in the middle of the title is removed before names ... ok
-
-----------------------------------------------------------------------
-Ran 67 tests in 31.616s
-
-OK
+test_session_snap.py::T10_Layout_Update::test_29_first_start_moves_and_reports PASSED
+test_session_snap.py::T10_Layout_Update::test_30_stop_old_watcher PASSED
+test_session_snap.py::T10_Layout_Update::test_31_install_option_explains PASSED
+test_session_snap.py::T10_Layout_Update::test_32_update_runs_bundled_script PASSED
+test_session_snap.py::T10_Layout_Update::test_33_reload_request_and_answers PASSED
+test_session_snap.py::T10_Layout_Update::test_34_cmd_reload PASSED
+test_session_snap.py::T10_Layout_Update::test_54_watch_not_started_without_session PASSED
+test_session_snap.py::T11_Kill_Live::test_80_collateral_and_browser PASSED
+test_session_snap.py::T11_Kill_Live::test_81_live_choice PASSED
+test_session_snap.py::T11_Kill_Live::test_82_kill_more_open_than_snapshot PASSED
+test_session_snap.py::T11_Kill_Live::test_83_side_effects_and_browser_need_confirmation PASSED
+test_session_snap.py::T11_Kill_Live::test_84_no_targets_and_warning PASSED
+test_session_snap.py::T11_Kill_Live::test_85_window_list_retry PASSED
+test_session_snap.py::T11_Kill_Live::test_86_capture_warning_and_save PASSED
+test_session_snap.py::T12_Interface::test_90_menu_keys PASSED
+test_session_snap.py::T12_Interface::test_91_checklist_keys PASSED
+test_session_snap.py::T12_Interface::test_92_checklist_folding_keys PASSED
+test_session_snap.py::T12_Interface::test_93_choose_scope_and_programs PASSED
+test_session_snap.py::T13_Paths_And_Commands::test_100_flatpak_entries PASSED
+test_session_snap.py::T13_Paths_And_Commands::test_101_interactive_menu PASSED
+test_session_snap.py::T13_Paths_And_Commands::test_102_pick_snapshot PASSED
+test_session_snap.py::T13_Paths_And_Commands::test_103_order_choice PASSED
+test_session_snap.py::T13_Paths_And_Commands::test_104_manage PASSED
+test_session_snap.py::T13_Paths_And_Commands::test_105_watch_cli PASSED
+test_session_snap.py::T13_Paths_And_Commands::test_106_config_and_load PASSED
+test_session_snap.py::T14_More_Paths::test_110_save_branches PASSED
+test_session_snap.py::T14_More_Paths::test_111_background_browser PASSED
+test_session_snap.py::T14_More_Paths::test_112_main_dispatch PASSED
+test_session_snap.py::T14_More_Paths::test_113_run_launches_without_session PASSED
+test_session_snap.py::T14_More_Paths::test_114_backup_and_recent PASSED
+test_session_snap.py::T15_Restore_Paths::test_120_restore_branches PASSED
+test_session_snap.py::T15_Restore_Paths::test_121_window_states PASSED
+test_session_snap.py::T15_Restore_Paths::test_122_app_window_and_order PASSED
+======================= 133 passed, 2 warnings in 54.41s =======================
 ```
 
 <a id="sec-release"></a>
 
 # Release procedure
 
-**Repository.** Development happens on `develop`; `main` contains only released versions. Every version is one commit on `main` with an annotated tag `v<version>`, for example `v1.8.0`. The commit message starts with `session-snap <version>: <summary>` and lists the changes. Versions before 1.8.0 were imported into the history from the delivered files; versions whose files were no longer available appear in `CHANGELOG.md` only.
-
-**Delivery rule.** Each file has **one fixed name**, so that a new version replaces the previous download of the same name. A release states size and SHA-256 hash of every asset.
-
-**Release checklist:**
-
-1. `VERSION` raised in `session-snap` and `test_session_snap` (test T49 checks that both are equal); `CHANGELOG.md` updated.
-2. `tools/check.sh` passes (all six [quality gates](#sec-gates)); the test suite also on Python 3.11 and 3.13.
-3. End-to-end runs and screen captures regenerated where the behaviour changed.
-4. Documentation and primer rebuilt with the release version.
-5. Merge `develop` into `main` (no fast-forward), tag, push both branches and the tag:
+Releases follow the dev-conventions (git-flow without release branches on the developer's side; GitHub with branch protection). `main` holds releases only, every release is an annotated tag `vX.Y.Z`; `develop` integrates finished features; changes are made on `feature/<name>` or `hotfix/<name>`. `main` and `develop` change only through `tools/release.sh` (GitHub variant): it rebases a feature onto `develop`, runs all gates before anything is merged, pushes the branch, opens the pull request, waits for the required checks, merges on the server, tags, merges back into `develop`, checks bit-identity with `tools/same-code.sh`, offers `./install.sh vX.Y.Z` and runs `tools/after-install.sh` (reload of the watcher).
 
 ```bash
-git switch main
-git merge --no-ff develop -m "session-snap 1.8.0: <summary>"
-git tag -a v1.8.0 -m "session-snap 1.8.0"
-git push origin main develop v1.8.0
-git switch develop
+cd ~/Projects/session-snap && git switch develop && git pull --ff-only && git switch -c feature/<short-name>
+tools/check.sh && git add -A && git commit -m "<what and why>" && tools/release.sh
 ```
 
-6. Create the GitHub release from the tag and attach `session-snap`, `test_session_snap`, `session-snap-documentation.md`/`.pdf`, `session-snap-primer.md`/`.pdf` and a file `SHA256SUMS` (normal user, GitHub CLI `gh`):
+The version is never edited by hand: `release.sh` computes it from the newest tag on `main` and the part (patch, minor, major) and writes `src/session_snap/__init__.py` and the heading of `CHANGELOG.md`, whose `## [Unreleased]` section must describe the change.
 
-```bash
-sha256sum session-snap test_session_snap session-snap-*.md session-snap-*.pdf > SHA256SUMS
-gh release create v1.8.0 --title "session-snap 1.8.0" --notes-file release-notes.md \
-    session-snap test_session_snap session-snap-*.md session-snap-*.pdf SHA256SUMS
-```
-
-Check downloaded assets as the normal user (only the download folder is read); every line must end with `OK`:
-
-```bash
-cd ~/Downloads
-sha256sum -c SHA256SUMS
-```
+**Release assets.** The PDFs of this document and of the Code Primer are attached to the GitHub release (`gh release upload vX.Y.Z …`), not committed.
 
 **Documentation build.** The Markdown sources are expanded by `build.py`: source listings, function excerpts (taken from the delivered file with Python's `ast` module, so that quotes cannot drift from the code), screen captures and test output are inserted, and every `mermaid` block is rendered to a vector PDF with mermaid-cli [[mermaid]](#ref-mermaid). The result is converted by Pandoc [[pandoc]](#ref-pandoc) with a Lua filter and built with XeLaTeX and `latexmk`, which also runs `makeindex`. The filter turns code blocks into grey, unbreakable boxes whose font size makes the longest line fit, turns citations into numbered links, adds an index entry for every glossary link, and maps the two parts to `\part`.
 
@@ -1046,6 +992,7 @@ Table: Versions.
 | 1.7.9 | 1 Nov 2026 | browser session restore (Chrome, Firefox); 66 tests |
 | 1.7.10 | 1 Nov 2026 | complete paths in the tree selection; documentation and primer updated |
 | 1.7.11 | 2 Nov 2026 | documentation of the same version installed with the program (or reported missing); 67 tests |
+| 2.0.0 | Nov 2026 | dev-conventions v6: package in `src/`, `install.sh` from release tags into a venv, XDG layout with one-time move, `update` (two steps) and `reload` (live update of `watch`), `release.sh` (GitHub), seven quality gates incl. shellcheck, pytest with 90 % branch coverage, CI 3.12/3.14; kill compares with the live state (defect #28); 133 tests |
 | 1.8.0 | 13 Nov 2026 | public repository; quality gates (privacy, format, pylint, mypy, bandit, tests with coverage), CI on GitHub Actions, pre-push hook; English docstrings; examples with Lorem-ipsum media; no change in behaviour; 67 tests |
 
 
