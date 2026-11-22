@@ -6,6 +6,44 @@ were delivered as single files and imported into the repository afterwards (see
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [2.0.0] - 2026-11-22
+
+### Added
+
+- `install.sh`: installs a release tag into `~/.local/share/session-snap/venv` and links
+  `~/.local/bin/session-snap`; moves the single-file program of 1.8.0 out of `~/scripts`
+  and rewrites the autostart entry of the watcher.
+- `session-snap update` (newer release first, then delivered patch archives) and
+  `session-snap reload` (live update of the running `watch` by self-restart, same PID).
+- `tools/release.sh` (GitHub variant) and `tools/same-code.sh` from the dev-conventions v6,
+  `tools/after-install.sh`, pre-push hook `.githooks/pre-push`, quality gate `shell`
+  (shellcheck), privacy scan over the whole history (`tools/privacy_scan.py`), CI with
+  Python 3.12 and 3.14.
+- Kill compares the selection with what is open now: if more is open than the snapshot
+  holds, it offers to save a new snapshot first; windows that close as a side effect are
+  listed and confirmed; a browser outside the chosen categories needs an explicit yes.
+
+### Changed
+
+- Package `session_snap` in `src/` (version in `src/session_snap/__init__.py`), tests with
+  pytest and at least 90 % branch coverage, Google-style docstrings checked by pylint.
+- XDG layout: configuration in `~/.config/session-snap/`, snapshots and logs in
+  `~/.local/state/session-snap/`; the files of `~/scripts/session-snap.d` move once on the
+  first start, never overwriting.
+- `--install` and the update from the download folder are gone: `--install` explains
+  `install.sh`, `--update` is an alias of `update`.
+
+### Fixed
+
+- Under heavy load the window list of the compositor timed out after 2 s and image viewers
+  with one process for all windows looked as if they showed only their first image; the list
+  is retried with 6 s, an incomplete capture is announced, and saving asks before writing it.
+- The tests no longer depend on the running desktop session: without isolation they saw the
+  real Wayland compositor, the real cosmic-panel and a running Chrome and failed on a
+  desktop (restore checklist, app window relaunch, appearance variables).
+
 ## [1.8.0] - 2026-11-13
 
 ### Added

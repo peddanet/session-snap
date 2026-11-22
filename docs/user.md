@@ -1,6 +1,6 @@
 # session-snap — User Guide
 
-> Version 1.8.0. Generated from the documentation source; the PDF edition (with rendered figures, index and the complete source listing) and its Markdown source are attached to every [GitHub release](https://github.com/peddanet/session-snap/releases). Terms are explained in the [glossary](glossary.md).
+> Version 2.0.0. The terminal captures were recorded with 1.8.0 and still show its paths below `~/scripts/session-snap.d`; since 2.0.0 the files are in the XDG folders (see Installation). Generated from the documentation source; the PDF edition (with rendered figures, index and the complete source listing) and its Markdown source are attached to every [GitHub release](https://github.com/peddanet/session-snap/releases). Terms are explained in the [glossary](glossary.md).
 
 <a id="sec-intro"></a>
 
@@ -10,9 +10,9 @@
 
 Hibernation preserves a desktop session completely. It is, however, slow, it needs swap space at least as large as the RAM, and it is not always reliable on laptops. In daily use, the context that matters is much smaller: *which videos were open, which images, which browsers and which other programs — with which files, and in which order*. session-snap records exactly this information as a [snapshot](glossary.md#gl-snapshot) and restores it after a normal boot.
 
-## What is new in versions 1.5 to 1.8.0
+## What is new in versions 1.5 to 2.0.0
 
-Table: Changes from version 1.7.0 to 1.8.0.
+Table: Changes from version 1.7.0 to 2.0.0.
 
 | Version | Area | Change |
 |---------|------|--------|
@@ -39,6 +39,8 @@ Table: Changes from version 1.7.0 to 1.8.0.
 | 1.7.11 | Installation | `--install` and the update also install documentation and primer (`.md`, `.pdf`) **of the same version** into `session-snap.d/docs/`; a missing file is reported ([installing](#sec-install)). 67 tests. |
 | 1.8.0 | Repository | Public repository `peddanet/session-snap` with the history of all available versions as tagged commits, branches `main` and `develop`, user and developer guide in `docs/`, `CHANGELOG.md`, `CONTRIBUTING.md`, demo snapshot with generated Lorem-ipsum media in `examples/` ([release procedure](developer.md#sec-release)). |
 | 1.8.0 | Quality | Six [quality gates](developer.md#sec-gates): privacy, format (≤ 100 characters), pylint 10.00/10, mypy, bandit, tests with branch coverage; English docstrings for every function and class; internal renames without behaviour change (`interactive()` → `interactive_menu()`, `_Wl._send()` → `_Wl.send()`). 67 tests. |
+| 2.0.0 | Conventions | Built and released by the dev-conventions v6: package `session_snap`, `install.sh` from release tags into `~/.local/share/session-snap/venv`, command `~/.local/bin/session-snap`, XDG layout with a one-time move of `~/scripts/session-snap.d` ([moving](#sec-migration)), `session-snap update` and `reload` ([update](#sec-update)), `tools/release.sh`, seven [quality gates](developer.md#sec-gates). `--install` and `--update` from the download folder are gone, hence a major version. |
+| 2.0.0 | Terminate | Kill compares the selection with what is open now, offers to save a new snapshot first, lists windows that close as a side effect and keeps browsers unless confirmed; the window list is retried under load and an incomplete capture is announced ([UC6](#uc6)). |
 
 
 Table: Changes from version 1.4.0 to 1.7.0.
@@ -89,8 +91,8 @@ Table: Requirements and their verification. Test IDs refer to the [test catalogu
 | R8  | Selection in a terminal checklist: arrow keys, `[x]` boxes toggled with the space bar, full paths visible. | T07, T18 |
 | R9  | `kill` terminates the recorded programs — never the script itself or the terminal it runs in. | T19–T25 |
 | R10 | Every action is logged. | T13, [storage](developer.md#sec-storage) |
-| R11 | Installation into the user's `~/scripts`, from any folder, without a separate installer. | T26, E8 |
-| R12 | `~/scripts` is put into `PATH` in `~/.profile` and `~/.bashrc`, guarded by a `case` switch so that it never appears twice. | T26 |
+| R11 | Installation from a release tag into a venv of its own (`install.sh`), command linked to `~/.local/bin` (since 2.0.0; up to 1.8.0: `--install` into `~/scripts`). | T26, T27 |
+| R12 | The `PATH` block of the versions up to 1.8.0 is kept and only mentioned (`~/scripts` stays in use for other scripts). | T29 |
 | R13 | Automated unit tests before every delivery. | [verification](developer.md#sec-verification) |
 | R14 | Runs as the normal desktop user; refuses to run as root. | T10 |
 | R15 | `kill` also terminates all Firefox and Chrome instances recorded in the snapshot. | T28, T30 |
@@ -106,9 +108,9 @@ Table: Requirements and their verification. Test IDs refer to the [test catalogu
 | R25 | All images of a single-instance viewer are recorded and restored, not only the first. | T42–T44, E4 |
 | R26 | Every restored VLC video gets its own (paused) window. | T45, E5 |
 | R27 | Restored programs follow the current system theme (light or dark). | T46, T50 |
-| R28 | Everything under `~/scripts`: program, test program and one data folder with sub-folders; nothing in `~/.local/state` or similar. | T26 |
-| R29 | A newer version in the download folder is offered at start; `--update` lists all versions, an older version only after confirmation; the old version is backed up first and never overwritten. | T47, T48, E8 |
-| R30 | The test program is installed together with the program of the same version. | T26, T47, T49 |
+| R28 | XDG layout: configuration, state and data folders of the tool; the layout up to 1.8.0 is moved once, never overwriting. | T26–T30 |
+| R29 | `session-snap update`: newer release first, then delivered patch archives (one question); `reload` switches the running watcher (since 2.0.0). | T32–T34, apply-release tests |
+| R30 | Program and tests are released together from one tagged commit (since 2.0.0). | release tool tests |
 | R31 | The Alt-Tab order of the windows is restored, including windows that are already open, which are put back between their former neighbours. | T51, T52, E6, E7 |
 | R32 | The order is recorded by a background process; if it does not run, a fallback order is used; the user can choose the order on restore. | T51, T52, E7, [order menu](#sec-order) |
 | R33 | Videos loop endlessly and keep playing after the first pass. | T45 |
@@ -146,16 +148,16 @@ Table: Contents of the repository and of release 1.8.0.
 
 All commands in this document run as the **normal desktop user**. The reason is explained in [prerequisites and privilege levels](#sec-installation).
 
-First installation, from the download folder (the browser may name the file `session-snap (1)`; then use that name in quotes):
+First installation from the repository ([installing](#sec-install)):
 
 ```bash
-python3 ~/Downloads/session-snap --install
+git clone https://github.com/peddanet/session-snap.git ~/Projects/session-snap
+cd ~/Projects/session-snap && ./install.sh && ~/.local/bin/session-snap --version
 ```
 
-Open a new terminal, then check:
+Check the background process:
 
 ```bash
-session-snap --version
 session-snap watch --status
 ```
 
@@ -187,229 +189,134 @@ A later version is installed by downloading it and starting `session-snap` once:
 
 ## Prerequisites and privilege levels
 
-Pop!_OS 24.04 is based on Ubuntu 24.04 and ships Python 3.12. The `curses` module is part of its standard library, and MIME types are read from `/etc/mime.types` of the package `media-types` [[mediatypes]](#ref-mediatypes). No additional package is required. mpv and nomacs are optional alternative programs; on the target system both are available from the `universe` repository.
+Pop!_OS 24.04 is based on Ubuntu 24.04 and ships Python 3.12. Since 2.0.0 session-snap is an ordinary Python package that is installed from a release tag into a virtual environment of its own ([dev-conventions](glossary.md#gl-devconventions), chapter "Installation pattern"). The installer needs `git` and the Python module `venv` (Ubuntu package `python3-venv`); the program itself uses the standard library only. mpv and nomacs are optional alternative programs.
 
-All steps of session-snap run as the **normal desktop user**. `sudo` is neither needed nor allowed, for three reasons:
+All steps of session-snap run as the **normal desktop user**. `sudo` is neither needed nor allowed for the tool itself:
 
-* the installation writes only below the home directory (`~/scripts`, `~/.profile`, `~/.bashrc`, `~/.config/autostart`);
+* the installation writes only below the home directory (the XDG folders listed in the next section, `~/.local/bin`, `~/.config/autostart`);
 * the tool must see the processes of *your* session and start programs inside *your* Wayland session; as root it would see foreign processes, and the programs it starts would have no access to your Wayland socket;
 * the tool refuses to run as root (test T10).
 
-The only exception in this document is installing optional programs with `apt`, which writes below `/usr` and therefore needs `sudo`.
+Only package installations with `apt` write below `/usr` and therefore need `sudo`.
 
 Table: Privilege level of every command in this document.
 
 | Command | Runs as | Justification |
 |---------|---------|---------------|
-| `python3 ~/Downloads/session-snap --install` | normal user | writes only `~/scripts`, `~/.profile`, `~/.bashrc`, `~/.config/autostart` |
-| `session-snap …` (all subcommands, also `watch`, `--update`) | normal user | reads only own processes; starts and terminates only own programs; writes only `~/scripts` |
-| `test_session_snap` | normal user | the tests start and terminate only their own dummy processes in temporary folders |
+| `./install.sh`, `./install.sh v2.0.0` | normal user | writes only `~/.local/share/session-snap/venv`, `~/.local/bin/session-snap`, `~/.local/state/session-snap/backup`, `~/.config/autostart` |
+| `session-snap …` (all subcommands, also `watch`, `update`, `reload`) | normal user | reads only own processes; starts and terminates only own programs; writes only its XDG folders |
+| `tools/check.sh`, `python3 -m pytest` | normal user | the tests start and terminate only their own dummy processes in temporary folders |
 | `apt-cache policy …`, `grep`, `ps`, `sha256sum`, `hash -r` | normal user | read-only queries, or affect only the current shell |
-| `sudo apt install mpv nomacs` | `sudo` from user context | package installation writes to `/usr` and the dpkg database |
+| `sudo apt install git python3-venv mpv nomacs` | `sudo` from user context | package installation writes to `/usr` and the dpkg database |
 
-Optional alternative programs — check availability, then install:
+Check and install the prerequisites (only what is missing needs installing):
 
 ```bash
-apt-cache policy mpv nomacs
-sudo apt install mpv nomacs
+apt-cache policy git python3-venv mpv nomacs
+sudo apt install git python3-venv
 ```
 
 <a id="sec-layout"></a>
 
 ## Folder layout
 
-Everything that belongs to session-snap lives in one folder. A file and a folder cannot have the same name, therefore the data folder is called `session-snap.d`:
+session-snap follows the XDG Base Directory layout of the dev-conventions: the category comes first, then the tool [[xdgbasedir]](#ref-xdgbasedir). The environment variables `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `XDG_DATA_HOME` are honoured if they hold absolute paths.
 
 ```text
-~/scripts/
-├── session-snap                     the program (a command, no .py)
-├── test_session_snap                its test program (same version)
-└── session-snap.d/                  data
-    ├── config.ini                   optional configuration
-    ├── programs.ini                 program choice for videos/images (written by the tool)
-    ├── order.json                   current Alt-Tab order (written by "session-snap watch")
-    ├── watch.lock                   lock + PID of the running background process
-    ├── snapshots/                   session-snap_<date>_<time>.json
-    ├── logs/                        session-snap.log
-    ├── docs/                        documentation and primer of the installed version (.md, .pdf)
-    └── backup/                      replaced versions, e.g. "session-snap v1.6.1.py"
+~/Projects/session-snap/               source (git clone) - only for developers
+~/.local/share/session-snap/
+├── venv/                              the installed release (install.sh)
+└── releases/                          patch archives applied by "session-snap update"
+~/.local/bin/session-snap              the command: link into the venv
+~/.config/session-snap/
+├── config.ini                         optional configuration
+├── programs.ini                       program choice for videos/images (written by the tool)
+└── privacy/denylist.txt, allowlist.txt   local terms of the privacy gate (developers)
+~/.local/state/session-snap/
+├── snapshots/                         session-snap_<date>_<time>.json (archiv/ inside)
+├── logs/                              session-snap.log
+├── backup/                            Firefox prefs.js before a change; old program files
+├── order.json                         current Alt-Tab order (written by "session-snap watch")
+├── watch.lock                         lock + PID of the running background process
+└── watch.restart, watch.answer        reload request and answer (session-snap reload)
+~/.config/autostart/session-snap-watch.desktop   starts "session-snap watch" at login
 ```
 
-Outside `~/scripts` only three files are touched: the `PATH` block in `~/.profile` and `~/.bashrc`, and the autostart entry `~/.config/autostart/session-snap-watch.desktop`, because the desktop session looks for autostart entries only there [[autostart]](#ref-autostart).
+**Backup or new machine:** copy `~/Projects/`, `~/.config/session-snap/`, `~/.local/state/session-snap/` and `~/.local/share/session-snap/` without `venv/`; then run `./install.sh` once, because a venv is bound to the Python of the machine.
 
 <a id="sec-install"></a>
 
 ## Installing
 
-**Where to get the files.** The release page of the repository `peddanet/session-snap` on GitHub offers `session-snap`, `test_session_snap` and the documentation (`.md` and `.pdf`) as release assets. Alternatively, a clone of the repository contains the program and the test program (not the PDFs):
+The code is always installed from a **release tag** `vX.Y.Z` of the repository, never from a working tree. Run as the normal user:
 
 ```bash
 git clone https://github.com/peddanet/session-snap.git ~/Projects/session-snap
-python3 ~/Projects/session-snap/session-snap --install
+cd ~/Projects/session-snap && ./install.sh && ~/.local/bin/session-snap --version
 ```
 
-`~/scripts` then receives a **copy** of the program, not a link: the installed tool keeps working while the clone is on another branch or being edited.
+* `git clone` puts the repository into `~/Projects/session-snap`.
+* `./install.sh` reads the release tags with `git ls-remote`, creates `~/.local/share/session-snap/venv` and installs the newest release there with pip (`./install.sh v2.0.0` installs a given one, `./install.sh --list` lists them). It checks that the program reports the version of the tag, links `~/.local/bin/session-snap` and finally runs `session-snap watch --status`, which performs the one-time move of older data and restarts the background process.
+* `~/.local/bin/session-snap --version` with the full path shows the installed release even if an active development venv would shadow the command.
 
-Download `session-snap` and `test_session_snap`, then run the downloaded file once with `--install`. `python3` is needed here because a downloaded file is not yet executable:
-
-```bash
-python3 ~/Downloads/session-snap --install
-```
-
-`--install` performs these steps; running it again changes nothing ([idempotent](glossary.md#gl-idempotent)):
-
-1. **Migration** of an older installation ([migration](#sec-migration)).
-2. **Program:** the running file is installed as `~/scripts/session-snap` (mode 0755). An existing, different program is backed up first.
-3. **Test program:** a `test_session_snap` of the **same version** — next to the downloaded file or in a download folder — is installed as `~/scripts/test_session_snap`.
-4. **PATH:** the `PATH` block for `~/scripts` is inserted into `~/.profile` and `~/.bashrc`, once ([PATH block](#sec-pathblock)).
-5. **Documentation** (since 1.7.11): `session-snap-documentation.md`/`.pdf` and `session-snap-primer.md`/`.pdf` of the **same version** — next to the downloaded file or in a download folder — are copied to `~/scripts/session-snap.d/docs/`; an older copy there is backed up first. The version is read from the Markdown title line and from the title field of the PDF document information; nothing is executed. A file that is not found is reported, for example `session-snap-primer.pdf zu Version 1.7.11 NICHT gefunden - bitte erzeugen bzw. herunterladen`.
-6. **Background process:** the autostart entry for `session-snap watch` is created and the process is started ([Alt-Tab order](#sec-order)).
+Ubuntu puts `~/.local/bin` into `PATH` at login if the folder exists then; after its first creation, log out and in once. Until then the full path works.
 
 <a id="sec-migration"></a>
 
-## Migration from version 1.5 and older
+## Moving from the layout up to 1.8.0
 
-Up to version 1.5 the tool was installed as `~/scripts/session-snap.py` by a separate script `install-session-snap.sh`, the data folder was `~/scripts/session-snap/`, and a link `~/.local/bin/session-snap` existed. `--install` converts this layout, and the program does the same at its first start from `~/scripts`. The order matters, because the old **folder** `session-snap/` must disappear before the new **file** `session-snap` can be created:
+Up to 1.8.0 session-snap was a single file in `~/scripts` with its data in `~/scripts/session-snap.d`. The move happens once and never overwrites anything:
 
-1. `session-snap/backup/*` → `session-snap.d/backup/`; `*.json` → `snapshots/`; `*.log` → `logs/`; `config.ini`, `programs.ini` → `session-snap.d/`; anything else → `backup/alte-ablage/`. Nothing is overwritten: an identical target removes the source, a different one gets a time stamp.
-2. The empty folder `session-snap/` is removed and the program file is created in its place.
-3. `session-snap.py` and `test_session_snap.py` are backed up (`session-snap v1.5.0.py`) and removed; `install-session-snap.sh` is moved to `backup/`; `session-snap-update.py` is removed.
-4. The link `~/.local/bin/session-snap` is removed; `~/scripts` is in `PATH`.
+1. **install.sh** moves `~/scripts/session-snap` and `~/scripts/test_session_snap` into `~/.local/state/session-snap/backup/` (as `session-snap v1.8.0` and so on) — only files it recognises as session-snap programs by their docstring and `VERSION` line — and rewrites the autostart entry of the watcher from the old program to `~/.local/bin/session-snap`.
+2. **The first start of 2.0.0** stops a watcher of the old version (only a process whose command line is `session-snap … watch`), then moves `config.ini` and `programs.ini` to `~/.config/session-snap/`, `snapshots/`, `logs/`, `backup/` and `order.json` to `~/.local/state/session-snap/`, `docs/` to `~/.local/share/session-snap/`. An identical target removes the source, a different one gets a time stamp; every move is reported; empty folders are removed. A folder that cannot be emptied stays and is reported.
+3. **The PATH block** `# >>> session-snap: ~/scripts in PATH >>>` in `~/.profile` and `~/.bashrc` stays: `~/scripts` remains the place for small unversioned scripts, which may rely on it. The first start only mentions it.
 
-Real output of the migration of an installation in the state of 28 October 2026 (1.5.0 installed, a backup folder, two snapshots, the link; captured in a test home, user name replaced):
-
-```text
-session-snap 1.7.0 - Installation nach /home/USER/scripts
-  /home/USER/scripts/session-snap/backup/test_session_snap v1.5.0.py -> /home/USER/scripts/session-snap.d/backup/test_session_snap v1.5.0.py 
-  /home/USER/scripts/session-snap/backup/install-session-snap v1.5.0.sh -> /home/USER/scripts/session-snap.d/backup/install-session-snap v1.5.0.sh 
-  /home/USER/scripts/session-snap/backup/session-snap v1.5.0.py -> /home/USER/scripts/session-snap.d/backup/session-snap v1.5.0.py 
-  /home/USER/scripts/session-snap/session-snap_2026-10-28_17-27-30.json -> /home/USER/scripts/session-snap.d/snapshots/session-snap_2026-10-28_17-27-30.json 
-  /home/USER/scripts/session-snap/session-snap_2026-10-25_13-00-51.json -> /home/USER/scripts/session-snap.d/snapshots/session-snap_2026-10-25_13-00-51.json 
-  /home/USER/scripts/session-snap/session-snap.log -> /home/USER/scripts/session-snap.d/logs/session-snap.log 
-  /home/USER/scripts/session-snap/ entfernt (Name wird fuer das Programm gebraucht)
-  /home/USER/scripts/session-snap: installiert (1.7.0)
-  /home/USER/scripts/session-snap.py -> Sicherung bereits vorhanden (entfernt)
-  /home/USER/scripts/install-session-snap.sh -> /home/USER/scripts/session-snap.d/backup/install-session-snap.sh (entfernt)
-  /home/USER/.local/bin/session-snap: Link entfernt (~/scripts ist im PATH)
-  /home/USER/scripts/session-snap: unveraendert (1.7.0)
-  /home/USER/scripts/test_session_snap: installiert (1.7.0)
-  /home/USER/.profile: Block eingefuegt (Sicherung: /home/USER/scripts/session-snap.d/backup/profile)
-  /home/USER/.bashrc: Block eingefuegt (Sicherung: /home/USER/scripts/session-snap.d/backup/bashrc)
-  /home/USER/.config/autostart/session-snap-watch.desktop: Autostart-Eintrag angelegt
-  session-snap watch: gestartet
-Ablage: /home/USER/scripts/session-snap.d/ (snapshots, logs, backup)
-Fertig. Aufruf: session-snap  (neue PATH-Eintraege wirken in neuen Terminals)
-```
-
-Resulting folder (after the installation and one update to 1.7.1, see [update](#sec-update)):
-
-```text
-scripts
-scripts/session-snap
-scripts/session-snap.d
-scripts/session-snap.d/backup
-scripts/session-snap.d/backup/bashrc
-scripts/session-snap.d/backup/install-session-snap v1.5.0.sh
-scripts/session-snap.d/backup/install-session-snap.sh
-scripts/session-snap.d/backup/profile
-scripts/session-snap.d/backup/session-snap v1.5.0.py
-scripts/session-snap.d/backup/session-snap v1.7.0.py
-scripts/session-snap.d/backup/test_session_snap v1.5.0.py
-scripts/session-snap.d/logs
-scripts/session-snap.d/logs/session-snap.log
-scripts/session-snap.d/snapshots
-scripts/session-snap.d/snapshots/session-snap_2026-10-25_13-00-51.json
-scripts/session-snap.d/snapshots/session-snap_2026-10-28_17-27-30.json
-scripts/session-snap.d/watch.lock
-scripts/test_session_snap
-```
-
-**Known defect.** The last line before `Ablage:` reads `session-snap watch: gestartet` even when no graphical session exists and the background process was therefore not started (here: test home without `WAYLAND_DISPLAY`). The autostart entry is created in any case, so the process starts at the next login. Proposed correction for 1.7.1: report "nicht gestartet" in this case.
-
-**After the migration** an already open terminal may still remember the old location of the command and report `~/.local/bin/session-snap: No such file or directory`. Bash keeps such a cache per shell; a new terminal or `hash -r` clears it.
-
-<a id="sec-pathblock"></a>
-
-## The PATH block
-
-The block is written in POSIX `sh` syntax, because `~/.profile` may also be read by `dash` [[bashstartup]](#ref-bashstartup). A `case` switch adds `~/scripts` only if it is not yet in `PATH`. Two independent guards apply:
-
-1. **File level:** the block is inserted only if its marker line is not present yet. Before the change, the rc file is backed up to `session-snap.d/backup/` (`profile`, `bashrc`).
-2. **Run-time level:** the `case` switch never adds a second entry, however often the block runs.
-
-```bash
-# >>> session-snap: ~/scripts in PATH >>>
-case ":${PATH}:" in
-    *":${HOME}/scripts:"*) ;;
-    *) PATH="${HOME}/scripts:${PATH}"; export PATH ;;
-esac
-# <<< session-snap: ~/scripts in PATH <<<
-```
-
-The older block `# >>> session-snap: ~/.local/bin in PATH >>>` of versions up to 1.5 stays untouched; it keeps `~/.local/bin` in `PATH` exactly once, as originally required.
+**After the move** an open terminal may still remember the old location of the command. Bash keeps such a cache per shell; a new terminal or `hash -r` clears it.
 
 <a id="sec-update"></a>
 
 ## Update
 
-**At every start in a terminal** session-snap looks into the download folders. If it finds a **newer** version, it asks; with `j` it backs up the running version, installs the new one (and the test program and the documentation of the same version, if present — or reports the missing documentation) and continues **immediately with the new version** (the process replaces itself with `exec`). If nothing newer is found, nothing is printed:
+**`session-snap update`** works in two steps and asks at most one question ([dev-conventions](glossary.md#gl-devconventions), chapter "Update command"):
 
-```text
-Neuere Version 1.7.1 gefunden: /home/USER/Downloads/session-snap (6)  (installiert: 1.7.0)
-Version 1.7.1 jetzt installieren? [j/N]   Sicherung: /home/USER/scripts/session-snap.d/backup/session-snap v1.7.0.py
-/home/USER/scripts/session-snap: installiert (1.7.1)
-Testprogramm 1.7.1 nicht im Download-Ordner - Testprogramm unveraendert
-Starte session-snap 1.7.1 ...
-Snapshots in /home/USER/scripts/session-snap.d/snapshots (neuester zuerst):
-  session-snap_2026-10-28_17-27-30.json      [Videos  0 | Bilder  0 | Browser  0 | Sonstige  0]
-  session-snap_2026-10-25_13-00-51.json      [Videos  0 | Bilder  0 | Browser  0 | Sonstige  0]
+1. **Newer release** (everyone): it compares the installed version with the newest tag of the repository (`git ls-remote`, no clone needed). A newer release is installed — with `./install.sh` of the clone if there is one, else with pip into the running venv — and a running watcher is asked to switch to it (`session-snap reload`).
+2. **Patch archives** (developers, needs the clone): archives `session-snap-feature-<name>.tar.gz` or `session-snap-hotfix-<name>.tar.gz` in `~/Downloads` are shown with branch, version part and message; after one confirmation they are applied with `git am` and released with `tools/release.sh`.
+
+```bash
+session-snap update --list
+session-snap update
 ```
 
-**`session-snap --update`** lists every version found, newest first, and marks the installed one. A number installs that version; an **older** version is installed only after a confirmation:
+`--list` only shows what would happen. Up to 1.8.0, `--install` and `--update` installed files from the download folder; since 2.0.0 `--install` explains the new way and `--update` is an alias of `update`.
 
-```text
-Installiert: /home/USER/scripts/session-snap  (1.7.0)
-Gefunden (neueste zuerst):
-   1. 1.7.1    2026-10-28 22:14  /home/USER/Downloads/session-snap (6)
-   2. 1.7.0    2026-10-28 22:14  /home/USER/Downloads/session-snap (5)  [installiert]
-   3. 1.5.1    2026-10-28 22:14  /home/USER/Downloads/session-snap (3).py
-Nummer zum Installieren (Enter = abbrechen): Abgebrochen.
-```
-
-**Download folders** searched: the XDG download folder (`~/.config/user-dirs.dirs`), `~/Downloads`, and the download folders set in Chrome, Chromium, Brave (`Preferences`) and Firefox (`prefs.js`), each also as Snap or Flatpak. Recognised names: `session-snap`, `session-snap (3)`, `session-snap(3).py` and the like; the same for `test_session_snap`.
-
-**Versions are read from the source text** (`VERSION = "…"`), never by running a file: an old version could start an action instead of printing its version.
-
-**Backups** are named `session-snap v1.6.1.py`. If that name exists with a different content, date and time are appended (`session-snap v1.6.1 2026-10-28_18-52.py`). Nothing is overwritten.
+**Live update of the watcher.** The background process `session-snap watch` runs for the whole session. `session-snap reload` writes a request file; the watcher checks it after every window event, probes the installed release (`python -m session_snap --version`), answers `accepted` or `rejected: <reason>` and replaces its process image with `os.execv` — same PID, no restart of the session ([dev-conventions](glossary.md#gl-devconventions), chapter "Live update of a running process"). `install.sh` and `tools/release.sh` (via `tools/after-install.sh`) call it after an installation.
 
 ## Checking the installation
 
 Run as the normal user in a **new** terminal:
 
 ```bash
-session-snap --version
-ls -l ~/scripts/session-snap ~/scripts/test_session_snap ~/scripts/session-snap.d/
-grep -c 'session-snap: ~/scripts in PATH >>>' ~/.profile ~/.bashrc
+~/.local/bin/session-snap --version
+command -v session-snap
 session-snap watch --status
 ```
 
-Expected output: the installed version (in the capture above `1.7.0`); two executable files and the data folder; the count `1` for each rc file; `Mitschreiber: laeuft (PID …); Autostart: ja`.
+Expected output: the installed version; `/home/USER/.local/bin/session-snap`; `Mitschreiber: laeuft (PID …); Autostart: ja`.
 
-Run the test suite (about 18 seconds):
+Developers run the quality gates in the clone (about two minutes; [quality gates](developer.md#sec-gates)):
 
 ```bash
-test_session_snap
+cd ~/Projects/session-snap && tools/check.sh
 ```
-
-Expected last lines: `Ran 52 tests` and `OK`.
 
 ## Uninstalling
 
-Stop the background process and delete its autostart entry, then delete `~/scripts/session-snap`, `~/scripts/test_session_snap` and, if the snapshots are no longer needed, `~/scripts/session-snap.d/`. Remove the block between the two marker lines from `~/.profile` and `~/.bashrc`:
+Stop the background process and delete its autostart entry, the link and the venv; delete the configuration and state folders only if the snapshots are no longer needed:
 
 ```bash
 session-snap watch --stop
-rm -- ~/.config/autostart/session-snap-watch.desktop
+rm -- ~/.config/autostart/session-snap-watch.desktop ~/.local/bin/session-snap
+rm -rf -- ~/.local/share/session-snap/venv
 ```
 
 <a id="sec-operation"></a>
@@ -433,8 +340,8 @@ Table: Subcommands. Dash aliases are accepted as the first argument: `--save`, `
 | `session-snap manage` | rename, archive, bring back and delete snapshots ([managing snapshots](#sec-manage)) |
 | `session-snap show [SNAP]` | print a snapshot with full paths and commands |
 | `session-snap config` | create a commented `config.ini` template |
-| `session-snap --install` | install into `~/scripts`, migrate an older installation ([installation](#sec-install)) |
-| `session-snap --update` | list the versions in the download folders and install one ([update](#sec-update)) |
+| `session-snap update [--list] [-y]` | install a newer release, then apply delivered patch archives ([update](#sec-update)) |
+| `session-snap reload` | switch a running `watch` to the installed release (live update, [update](#sec-update)) |
 | `session-snap --version` | print the version |
 
 Table: Options.
@@ -1061,12 +968,12 @@ Independent check afterwards, read from the compositor:
 Which categories are maximized is set with `maximize` in `config.ini` (default since 1.7.1: videos; `all` includes browsers and other programs). `--no-maximize` switches it off for one restore. Without COSMIC — for example in an SSH session, or under another desktop — the programs are started normally and a hint is printed:
 
 ```text
-Hinweis: Fenster werden nicht maximiert - Verbindung zu /tmp/xdg-vtest/wayland-nicht-da fehlgeschlagen: [Errno 2] No such file or directory
+Hinweis: Fenster werden nicht maximiert - Verbindung zu /run/user/1000/wayland-nicht-da fehlgeschlagen: [Errno 2] No such file or directory
 Darstellung: keine Desktop-Sitzung gefunden - wie beim Speichern
 [  1/1] Videos             OK    /home/USER/Videos/Tag 3.mkv  [--pause]
 
 Ergebnis: 1 gestartet, 0 fehlgeschlagen. Log: /home/USER/m/s15b/logs/session-snap.log
-Hinweis: Reihenfolge nicht hergestellt - Verbindung zu /tmp/xdg-vtest/wayland-nicht-da fehlgeschlagen: [Errno 2] No such file or directory
+Hinweis: Reihenfolge nicht hergestellt - Verbindung zu /run/user/1000/wayland-nicht-da fehlgeschlagen: [Errno 2] No such file or directory
 ```
 
 The technical background is described in [window control on COSMIC](developer.md#sec-window).
@@ -1242,7 +1149,7 @@ The window switcher (Alt-Tab) of COSMIC is provided by the launcher plugin `cosm
 It is started at every login through the autostart entry `~/.config/autostart/session-snap-watch.desktop`. On Pop!_OS, `cosmic-session` pulls in `xdg-desktop-autostart.target`, whose services the systemd generator creates from these entries [[cosmicsession]](#ref-cosmicsession), [[xdgautostartgen]](#ref-xdgautostartgen), [[autostart]](#ref-autostart).
 
 ```bash
-session-snap watch --start      # create the autostart entry and start it now (done by --install)
+session-snap watch --start      # create the autostart entry and start it now (done by install.sh)
 session-snap watch --status     # running? autostart entry present?
 session-snap watch --stop       # end it (it starts again at the next login)
 ```
@@ -1320,7 +1227,7 @@ Alt-Tab-Reihenfolge: 5 Fenster - Mitschreiber laeuft nicht: Reihenfolge des Oeff
 
 # Configuration
 
-The configuration file `~/scripts/session-snap.d/config.ini` is optional. Create the template as the normal user:
+The configuration file `~/.config/session-snap/config.ini` is optional. Create the template as the normal user:
 
 ```bash
 session-snap config
@@ -1516,6 +1423,8 @@ flowchart LR
 
 **Expected result:** only the entries of the chosen category that are not running are started. *Verified by:* the selection path of T14/T18; the category filter is a list filter on the same code path.
 
+<a id="uc6"></a>
+
 ## UC6 — Terminate the recorded programs
 
 ```bash
@@ -1548,7 +1457,15 @@ sequenceDiagram
 
 [SIGTERM](glossary.md#gl-sigterm) asks a program to exit; it can save its state or ask "save changes?". [SIGKILL](glossary.md#gl-sigkill) cannot be caught, blocked or ignored [[signal7]](#ref-signal7), so it is used only with `--force` or after an explicit confirmation. Several entries of the same process, such as two images in one viewer, are merged into one target that receives exactly one signal.
 
-**Expected result:** all matched programs exit. Programs that do not react are reported and receive SIGKILL only with `--force`. The script and its terminal are never terminated. *Verified by:* T19–T23.
+**Comparison with what is open now (since 2.0.0).** The snapshot decides which programs are offered, but session-snap compares the selection with the current state before it signals anything:
+
+* If more entries of the chosen categories are open than the snapshot holds (for example 17 images open, 2 in the snapshot), it asks: **[1]** save a new snapshot first ("vor dem Beenden"), then terminate all open entries of these categories; **[2]** terminate only the snapshot's entries; **[3]** cancel.
+* A process always ends as a whole. If it shows more than was chosen — an image viewer with one process for all its windows, a browser that shows an image — the extra windows are listed ("eog (PID …) schliesst auch 15 weitere(s): …") and confirmed first.
+* A browser among the targets of a selection without the category *Browser* is terminated only after the explicit question "Browser wirklich beenden?"; without a terminal it stays open.
+* If the window list of the compositor is not available (heavy load), every capture says so ("ACHTUNG: Fensterliste nicht verfuegbar … Zahl der Bilder unvollstaendig"); saving asks before writing such an incomplete snapshot. The window list is requested twice, with 2 s and 6 s.
+* The log records the menu choice with all counts and every fallback.
+
+**Expected result:** all matched programs exit. Programs that do not react are reported and receive SIGKILL only with `--force`. The script and its terminal are never terminated. *Verified by:* T19–T23, T80–T86.
 
 ## UC7 — Replacement for hibernation
 
@@ -1841,38 +1758,14 @@ sequenceDiagram
 
 ## UC16 — Install a new version
 
-**Goal:** a new version was downloaded; it should replace the installed one, with a backup.
+**Goal:** a new release was published; it should replace the installed one, and the running watcher should switch to it.
 
 ```bash
-session-snap
+session-snap update --list
+session-snap update
 ```
 
-Answer `j`. Alternatively, to see all versions or to go back to an older one:
-
-```bash
-session-snap --update
-```
-
-```mermaid
-%% caption: UC16 — update at start
-sequenceDiagram
-    autonumber
-    actor U as User
-    participant S as session-snap (old)
-    participant D as Download folders
-    participant B as session-snap.d/backup
-    participant N as session-snap (new)
-    U->>S: session-snap …
-    S->>D: find session-snap*, test_session_snap*
-    S->>S: read VERSION from the source text (not executed)
-    S->>U: "Neuere Version 1.7.1 gefunden … [j/N]"
-    U->>S: j
-    S->>B: copy old program as "session-snap v1.7.0.py"
-    S->>S: install new program (+ test program of the same version)
-    S->>N: exec: continue with the same arguments
-```
-
-**Expected result:** the new version runs immediately with the same command; the old one is in `backup/`; an older version is installed only after confirmation. *Verified by:* T47, T48, E8.
+**Expected result:** `--list` shows the installed and the newest release; `update` installs it, checks `--version` and reports the answer of the watcher (`accepted: … -> …`). *Verified by:* apply-release tests, T32–T34.
 
 ## UC17 — Restore the Alt-Tab order
 
@@ -1975,8 +1868,8 @@ Table: Symptoms, causes and actions.
 | Symptom | Likely cause | Action |
 |------------------------|----------------------|--------------------------|
 | `session-snap: … ~/.local/bin/session-snap: No such file or directory` right after the migration | the open shell remembers the old location | `hash -r` or a new terminal |
-| `python3 … --install` ends with `FileExistsError: … Downloads/session-snap` | an **old** version (≤ 1.5) was started; it looks for a data folder next to itself | start the new file `session-snap` (no `.py`, newest number) |
-| A newer download is not offered | not in a known download folder, unusual file name, or `stdin`/`stdout` not a terminal | `session-snap --update` shows the folders searched |
+| `session-snap update` finds no newer release | the newest tag is installed already, or no network access to GitHub | `./install.sh --list` in the clone lists the tags |
+| "ACHTUNG: Fensterliste nicht verfuegbar" when saving or terminating | the compositor did not answer within 2 s and 6 s (heavy load) | wait until the load drops, then repeat; the image count is incomplete meanwhile |
 | Restored programs light although the desktop is dark | no session process found (e.g. SSH) or the cause is not an environment variable | `session-snap diagnose`: line "Desktop-Sitzung (Vorlage …)" |
 | Alt-Tab order not restored | background process not running at save time (fallback used), or COSMIC not available | `session-snap watch --status`; `session-snap watch --start` |
 | "n von m Fenstern geordnet" with n < m | a window did not appear within `maximize_timeout`, or its title does not name its file | raise `maximize_timeout`; check titles with `diagnose` |
@@ -2033,9 +1926,7 @@ The last command must print the three lines without `#`. Applied and confirmed o
 
 Checked between 14 October and 1 November 2026; **[V]** content verified, **[I]** found in the search index, **[X]** not retrievable (kept for documentation).
 
-- <a id="ref-mediatypes"></a>**[mediatypes]** Local observation: `/etc/mime.types` belongs to package `media-types` on Ubuntu 24.04.5 (`dpkg -S`); `.mkv` → `video/x-matroska`. Inspected on 15 Oct 2026. — **[V]** (local)
-- <a id="ref-autostart"></a>**[autostart]** freedesktop.org: *Desktop Application Autostart Specification* — user autostart directory `~/.config/autostart/`. <https://specifications.freedesktop.org/autostart-spec/latest> — **[V]**
-- <a id="ref-bashstartup"></a>**[bashstartup]** GNU Bash Reference Manual: *Bash Startup Files*. <https://gnu.org/s/bash/manual/html_node/Bash-Startup-Files.html> — **[I]**
+- <a id="ref-xdgbasedir"></a>**[xdgbasedir]** freedesktop.org: *XDG Base Directory Specification* — defaults `~/.local/share`, `~/.config`, `~/.local/state` for unset or empty variables. <https://specifications.freedesktop.org/basedir/latest/> — **[I]**
 - <a id="ref-pycurses"></a>**[pycurses]** Python documentation: *curses*. <https://docs.python.org/3/library/curses> — **[I]**
 - <a id="ref-ctlseqs"></a>**[ctlseqs]** T. Dickey: *XTerm Control Sequences*. <https://www.invisible-island.net/xterm/ctlseqs/ctlseqs.html> — **[I]**
 - <a id="ref-escdelay"></a>**[escdelay]** ncurses: *curs_variables(3x)* (`ESCDELAY`). <https://www.man7.org/linux/man-pages/man3/curs_variables.3x.html> — **[I]**
@@ -2066,6 +1957,7 @@ Checked between 14 October and 1 November 2026; **[V]** content verified, **[I]*
 - <a id="ref-poplauncher"></a>**[poplauncher]** System76: *pop-launcher* source code, plugin `plugins/src/cosmic_toplevel/mod.rs` (activated window moved to the end of the list). <https://github.com/pop-os/launcher> — **[V]** (repository cloned on 28 Oct 2026, commit `86c2639b`)
 - <a id="ref-cosmicsession"></a>**[cosmicsession]** System76: *cosmic-session* source code, `data/cosmic-session.target` (`Wants=xdg-desktop-autostart.target`), `src/main.rs` (own autostart scan only without systemd). <https://github.com/pop-os/cosmic-session> — **[V]** (repository cloned on 28 Oct 2026, commit `4b0a0a24`)
 - <a id="ref-xdgautostartgen"></a>**[xdgautostartgen]** systemd: *systemd-xdg-autostart-generator(8)* — services generated from autostart entries, started through `xdg-desktop-autostart.target`. <https://man7.org/linux/man-pages/man8/systemd-xdg-autostart-generator.8.html> — **[V]**
+- <a id="ref-autostart"></a>**[autostart]** freedesktop.org: *Desktop Application Autostart Specification* — user autostart directory `~/.config/autostart/`. <https://specifications.freedesktop.org/autostart-spec/latest> — **[V]**
 - <a id="ref-signal7"></a>**[signal7]** Linux man-pages: *signal(7)* (Ubuntu manpages). <https://manpages.ubuntu.com/manpages/bionic/man7/signal.7.html> — **[I]**
 - <a id="ref-vlcpulse"></a>**[vlcpulse]** VideoLAN: VLC 3.0.20 source, `modules/audio_output/pulse.c` (`MuteSet()`, `sink_input_info_cb()`, `flags_force`). <https://github.com/videolan/vlc/blob/3.0.20/modules/audio_output/pulse.c> — **[V]** (retrieved via raw.githubusercontent.com, 1 Nov 2026)
 - <a id="ref-wpstream"></a>**[wpstream]** WirePlumber documentation: *Stream configuration* — volume and mute state of streams are remembered and restored when the same application appears. <https://pipewire.pages.freedesktop.org/wireplumber/daemon/configuration/stream.html> — **[V]**

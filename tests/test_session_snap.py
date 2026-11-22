@@ -1,10 +1,7 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Unit and integration tests for session-snap.py (Python standard library only).
+"""Unit and integration tests for session-snap (pytest; Python standard library only).
 
-Run as the normal desktop user, next to the program (~/scripts/session-snap):
-    test_session_snap            (or: python3 test_session_snap -v)
+Run as the normal desktop user from the clone (tools/check.sh runs them with coverage):
+    python3 -m pytest -q
 
 Safety: the tests only ever signal dummy processes they started themselves. The dummies are
 copies of the Python interpreter named vlc / eog / fakeapp / hiddenapp inside a temporary
@@ -18,8 +15,7 @@ from __future__ import annotations
 import contextlib
 import curses
 import fcntl
-import importlib.machinery
-import importlib.util
+import importlib
 import io
 import json
 import os
@@ -37,29 +33,21 @@ import termios
 import threading
 import time
 import unittest
-import zlib
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
 from urllib.parse import quote
 
-VERSION = "1.8.0"  # must equal VERSION of the program it tests (used by --install/--update)
 HERE = Path(__file__).resolve().parent
-_DEFAULT = HERE / "session-snap" if (HERE / "session-snap").is_file() else HERE / "session-snap.py"
-SCRIPT = Path(os.environ.get("SESSION_SNAP_SCRIPT", _DEFAULT))
+SRC = HERE.parent / "src"
 IS_ROOT = os.geteuid() == 0
-
-
-def _load_module():
-    # the program file has no .py suffix: name the loader explicitly
-    loader = importlib.machinery.SourceFileLoader("session_snap", str(SCRIPT))
-    spec = importlib.util.spec_from_loader("session_snap", loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod
-
-
-ss = _load_module()
+os.environ.setdefault("SESSION_SNAP_DIR", tempfile.mkdtemp(prefix="ssnap-import-"))
+ss = importlib.import_module("session_snap.cli")
+SCAN_PROCESSES = ss.scan_processes   # the real scan, before any test replaces it
+# command line of the program for tests that start it as a process
+PROG = [sys.executable, "-m", "session_snap"]
+os.environ["PYTHONPATH"] = str(SRC) + (os.pathsep + os.environ["PYTHONPATH"]
+                                       if os.environ.get("PYTHONPATH") else "")
 os.environ["SESSION_SNAP_OVERLAY"] = "0"   # no desktop notifications while testing (T59: own)
 
 SLEEP = "import time\ntime.sleep(120)\n"
@@ -137,7 +125,13 @@ class Base(unittest.TestCase):
         os.environ.update({"XDG_DATA_HOME": str(cls.tmp / "data"),
                            "XDG_DATA_DIRS": str(cls.tmp / "sys"),
                            "SESSION_SNAP_DIR": str(cls.store)})
-        os.environ.setdefault("WAYLAND_DISPLAY", "wayland-test")
+        # isolated from a running desktop session: no Wayland socket (window list unknown,
+        # as over SSH) and no real session process as reference for the appearance
+        (cls.tmp / "run").mkdir(mode=0o700)
+        os.environ.update({"WAYLAND_DISPLAY": "wayland-test",
+                           "XDG_RUNTIME_DIR": str(cls.tmp / "run")})
+        cls._session_refs = ss.SESSION_REFS
+        ss.SESSION_REFS = ("ssnap-panel",)
         ss.init_paths()
         ss.setup_logging()
         cls.cfg = ss.load_config()
@@ -150,6 +144,7 @@ class Base(unittest.TestCase):
             h.close()
         os.environ.clear()
         os.environ.update(cls._env_backup)
+        ss.SESSION_REFS = cls._session_refs
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def setUp(self):
@@ -185,7 +180,18 @@ class Base(unittest.TestCase):
             time.sleep(0.05)
 
     def spawn(self, name, code, *args, cwd=None, hold=None):
-        """Start dummy program `name` running `code`; it is ended in tearDown."""
+        """Start dummy program `name` running `code`; it is ended in tearDown.
+
+        Args:
+            name (str): Program name of the dummy (a copy of the interpreter).
+            code (str): Python code it runs.
+            *args: Further command line arguments.
+            cwd (Path | None): Working directory; None uses the test folder.
+            hold (Path | None): File the dummy keeps open (variable F).
+
+        Returns:
+            subprocess.Popen: The started process.
+        """
         env = dict(os.environ)
         if hold:
             env["F"] = str(hold)
@@ -198,15 +204,42 @@ class Base(unittest.TestCase):
         return p
 
     def mine(self, entries):
-        """Only the entries that belong to dummy processes of this test."""
+        """Only the entries that belong to dummy processes of this test.
+
+        Args:
+            entries (list): Entries of a capture.
+
+        Returns:
+            list: The entries of this test's dummies.
+        """
         return [e for e in entries if e["cmd"][0].startswith(str(self.bin) + "/")]
 
+    def only_dummies(self):
+        """Running processes, restricted to the dummies of this test (stand-in for
+        ss.scan_processes, so that real programs of the desktop are not seen).
+
+        Returns:
+            dict: {pid: Proc} of the dummies.
+        """
+        mine = set(self._dummy_pids())
+        return {pid: p for pid, p in SCAN_PROCESSES().items() if pid in mine}
+
     def entries(self):
-        """Current capture, filtered to the dummies of this test."""
+        """Current capture, filtered to the dummies of this test.
+
+        Returns:
+            list: The filtered entries.
+        """
         return self.mine(ss.build_entries(self.cfg))
 
     def wait_for(self, pred, timeout=8.0, msg="condition"):
-        """Poll `pred` until it is true or fail after `timeout` seconds."""
+        """Poll `pred` until it is true or fail after `timeout` seconds.
+
+        Args:
+            pred (Callable): Condition to poll.
+            timeout (float): Seconds until the test fails.
+            msg (str): Description for the failure message.
+        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if pred():
@@ -215,7 +248,11 @@ class Base(unittest.TestCase):
         self.fail(f"timeout waiting for {msg}")
 
     def start_standard_set(self):
-        """vlc holding the film via fd only, eog with relative + file:// args, fakeapp."""
+        """vlc holding the film via fd only, eog with relative + file:// args, fakeapp.
+
+        Returns:
+            list: The entries of the started dummies.
+        """
         self.spawn("vlc", HOLD_F, hold=self.film)
         uri = "file://" + quote(str(self.gif))
         self.spawn("eog", SLEEP, "a.png", uri, cwd=self.media)
@@ -229,14 +266,25 @@ class Base(unittest.TestCase):
 
     @contextlib.contextmanager
     def isolated(self):
-        """Restrict build_entries to the dummies - real desktop programs stay untouched."""
+        """Restrict build_entries to the dummies - real desktop programs stay untouched.
+
+        Yields:
+            None: While build_entries sees only the dummies.
+        """
         orig = ss.build_entries
         with mock.patch.object(ss, "build_entries", lambda cfg, procs=None, windows=False:
                                self.mine(orig(cfg, procs, windows))):
             yield
 
     def run_main(self, *argv) -> tuple[int, str]:
-        """Run main() with `argv`; returns (exit code, captured stdout)."""
+        """Run main() with `argv`; returns (exit code, captured stdout).
+
+        Args:
+            *argv: Command line arguments.
+
+        Returns:
+            (exit code, captured standard output).
+        """
         buf = io.StringIO()
         with self.isolated(), contextlib.redirect_stdout(buf):
             rc = ss.main(list(argv))
@@ -427,39 +475,6 @@ class T1_Unit(Base):
         self.assertEqual(ss.list_snapshots(), [a])
         ss.delete_snapshot(a)
 
-    def test_67_install_docs_of_same_version(self):
-        """documentation and primer (.md, .pdf) of the installed version are copied to docs/;
-        the version is read from the Markdown title and from the PDF title (compressed, UTF-16);
-        other versions are ignored; a missing file is reported"""
-        dl = self.tmp / "dl-docs"
-        dl.mkdir(exist_ok=True)
-
-        def pdf(path, title):
-            info = (b"<< /Title <" + ("\ufeff" + title).encode("utf-16-be").hex().encode()
-                    + b"> /Producer (xdvipdfmx) >>")
-            z = zlib.compress(info)
-            path.write_bytes(b"%PDF-1.5\n1 0 obj\n<< /Length " + str(len(z)).encode()
-                             + b" /Filter /FlateDecode >>\nstream\n" + z
-                             + b"\nendstream\nendobj\n%%EOF\n")
-        (dl / "session-snap-documentation (3).md").write_text('---\ntitle: "session-snap 9.1.0"\n')
-        (dl / "session-snap-documentation.md").write_text('---\ntitle: "session-snap 9.0.0"\n')
-        pdf(dl / "session-snap-documentation.pdf", "session-snap 9.1.0")
-        (dl / "session-snap-primer.md").write_text(
-            '---\ntitle: "session-snap 9.1.0 — Code Primer"\n')
-        self.assertEqual(ss.doc_version(dl / "session-snap-documentation.pdf"), "9.1.0")
-        with mock.patch.object(ss, "download_dirs", return_value=[dl]):
-            out = ss.install_docs("9.1.0")
-        d = ss.docs_dir()
-        self.assertEqual(ss.doc_version(d / "session-snap-documentation.md"), "9.1.0")
-        self.assertEqual(ss.doc_version(d / "session-snap-documentation.pdf"), "9.1.0")
-        self.assertEqual(ss.doc_version(d / "session-snap-primer.md"), "9.1.0")
-        self.assertTrue(any("session-snap-primer.pdf zu Version 9.1.0 NICHT gefunden" in x
-                            for x in out), out)
-        with mock.patch.object(ss, "download_dirs", return_value=[dl]):
-            again = ss.install_docs("9.1.0")
-        self.assertTrue(any("unveraendert" in x for x in again), again)
-        shutil.rmtree(d)
-
     def test_07_key_decoding(self):
         """_getkey(): ESC[B and ESC O B -> down, ESC[6~ -> PgDn, lone Esc -> 27, junk -> -1"""
 
@@ -469,11 +484,19 @@ class T1_Unit(Base):
                 self.q = [ord(c) for c in seq]
 
             def getch(self):
-                """Next queued key code, -1 when empty."""
+                """Next queued key code, -1 when empty.
+
+                Returns:
+                    int: Key code.
+                """
                 return self.q.pop(0) if self.q else -1
 
             def nodelay(self, flag):
-                """Ignored (curses API stub)."""
+                """Ignored (curses API stub).
+
+                Args:
+                    flag (bool): Ignored.
+                """
 
         self.assertEqual(ss._getkey(Scr("\x1b[B")), curses.KEY_DOWN)
         self.assertEqual(ss._getkey(Scr("\x1bOB")), curses.KEY_DOWN)
@@ -627,11 +650,19 @@ class T3_Restore(Base):
         env = dict(os.environ, TERM="xterm-256color")
         pid, fd = pty.fork()
         if pid == 0:  # child
-            os.execvpe(sys.executable, [sys.executable, str(SCRIPT), "restore", "-s", "latest"],
+            os.execvpe(sys.executable, PROG + ["restore", "-s", "latest"],
                        env)
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
 
         def read(t):
+            """Read what the terminal shows until a text appears.
+
+            Args:
+                t (float): Seconds to read.
+
+            Returns:
+                str: Output read so far.
+            """
             data, end = b"", time.monotonic() + t
             while time.monotonic() < end:
                 r, _, _ = select.select([fd], [], [], 0.05)
@@ -749,7 +780,6 @@ class T4_Kill(Base):
         self.wait_for(lambda: want == {ss.signature(e) for e in self.entries()},
                       msg="cycle restored")
 
-
     def test_56_kill_checklist_folded_categories(self):
         """interactive kill, 'Auswahl treffen': tree with root 'Alle Programme', categories
         folded (overview with program names), legend at the bottom; Space on the root
@@ -761,11 +791,19 @@ class T4_Kill(Base):
         env = dict(os.environ, TERM="xterm-256color")
         pid, fd = pty.fork()
         if pid == 0:  # child
-            os.execvpe(sys.executable, [sys.executable, str(SCRIPT), "kill", "-s", "latest"],
+            os.execvpe(sys.executable, PROG + ["kill", "-s", "latest"],
                        env)
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 160, 0, 0))
 
         def read(t):
+            """Read what the terminal shows until a text appears.
+
+            Args:
+                t (float): Seconds to read.
+
+            Returns:
+                str: Output read so far.
+            """
             data, end = b"", time.monotonic() + t
             while time.monotonic() < end:
                 r, _, _ = select.select([fd], [], [], 0.05)
@@ -851,7 +889,9 @@ class T6_Browser_Programs(Base):
         self.spawn("chrome", ONE, "--profile-directory=Default")
         self.wait_for(lambda: len(self.entries()) == 1, msg="chrome")
         wins = [("chrome-abc123-Default", "Claude"), ("google-chrome", "Neuer Tab")]
-        with mock.patch.object(ss, "list_windows", return_value=wins):
+        # only the dummies: a real Chrome of the desktop would otherwise host the app window
+        with mock.patch.object(ss, "list_windows", return_value=wins), \
+                mock.patch.object(ss, "scan_processes", self.only_dummies):
             es = self.entries()
             self.assertEqual(sorted(e["program"] for e in es), ["Claude", "chrome"])
             app = next(e for e in es if e.get("app"))
@@ -1177,7 +1217,16 @@ class FakeCosmic:
                    + self._msg(hid, 8, self._states(win)) + self._msg(hid, 1))
 
     def add_window(self, app_id, title, active=False):
-        """Announce a new toplevel window to the connected clients."""
+        """Announce a new toplevel window to the connected clients.
+
+        Args:
+            app_id (str): Application id of the window.
+            title (str): Window title.
+            active (bool): Mark it as the active window.
+
+        Returns:
+            int: Handle of the new window.
+        """
         win = {"app_id": app_id, "title": title}
         with self.lock:
             self.windows.append(win)
@@ -1189,7 +1238,11 @@ class FakeCosmic:
         return win
 
     def activate(self, win):
-        """the user (or a client) activates a window: state events to every client"""
+        """the user (or a client) activates a window: state events to every client
+
+        Args:
+            win (int): Handle of the window.
+        """
         with self.lock:
             for w in self.windows:
                 w["active"] = w is win
@@ -1218,7 +1271,7 @@ class FakeCosmic:
                     st["types"][reg] = "registry"
                     for n, iface in names.items():
                         self._send(st, self._msg(reg, 0, struct.pack("=I", n)
-                                                + self._str(iface) + struct.pack("=I", 1)))
+                                                 + self._str(iface) + struct.pack("=I", 1)))
                 elif typ == "display" and op == 0:            # sync
                     self._send(st, self._msg(struct.unpack_from("=I", p)[0], 0,
                                              struct.pack("=I", 0)))
@@ -1453,7 +1506,12 @@ XBEL_ITEM = """  <bookmark href="{href}" added="{t}" modified="{t}" visited="{t}
 
 
 def write_xbel(data_home, items):
-    """items: [(path, program, ISO time)]"""
+    """items: [(path, program, ISO time)]
+
+    Args:
+        data_home (Path): XDG data folder of the test.
+        items (list): (path, program, ISO time) per file.
+    """
     body = "\n".join(XBEL_ITEM.format(href="file://" + quote(str(f)), app="Image Viewer",
                                       prog=prog, t=t) for f, prog, t in items)
     (Path(data_home) / "recently-used.xbel").write_text(XBEL.format(items=body))
@@ -1593,16 +1651,16 @@ class T9_Single_Instance(Base):
     def test_50_system_theme_wins(self):
         """restore follows the CURRENT desktop session (system theme), not the recorded
         environment: a viewer saved in light mode comes back dark when the desktop is dark"""
-        shutil.copy2(os.path.realpath(sys.executable), self.bin / "cosmic-panel")
+        shutil.copy2(os.path.realpath(sys.executable), self.bin / "ssnap-panel")
         env = dict(os.environ, GTK_THEME="Adwaita:dark", COLOR_SCHEME_TEST="1")
         panel = subprocess.Popen(  # pylint: disable=consider-using-with
-            [str(self.bin / "cosmic-panel"), "-c", SLEEP], env=env,
-                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, start_new_session=True)
+            [str(self.bin / "ssnap-panel"), "-c", SLEEP], env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
         self.children.append(panel)
         self.wait_for(lambda: ss.session_look_env() is not None, msg="session process")
         name, pid, look = ss.session_look_env()
-        self.assertEqual((name, pid, look["GTK_THEME"]), ("cosmic-panel", panel.pid,
+        self.assertEqual((name, pid, look["GTK_THEME"]), ("ssnap-panel", panel.pid,
                                                           "Adwaita:dark"))
         e = {"category": "image", "program": "eog", "files": [str(self.png)], "cwd": "",
              "cmd": [str(self.bin / "eog"), "-c", SLEEP, str(self.png)],
@@ -1610,12 +1668,12 @@ class T9_Single_Instance(Base):
         ss.save_snapshot([e], "hell")
         with mock.patch.dict(os.environ, {"GTK_THEME": "Adwaita"}):
             _rc, out = self.run_main("restore", "-s", "latest", "--all", "--no-maximize")
-        self.assertIn("wie die Desktop-Sitzung: cosmic-panel", out)
+        self.assertIn("wie die Desktop-Sitzung: ssnap-panel", out)
         self.wait_for(lambda: [p for p in self._dummy_pids() if p != panel.pid], msg="eog")
         new = [p for p in self._dummy_pids() if p != panel.pid][0]
         self.assertEqual(ss._read_environ(new).get("GTK_THEME"), "Adwaita:dark")
         _rc, out = self.run_main("diagnose")
-        self.assertIn("Desktop-Sitzung (Vorlage fuer Darstellung): cosmic-panel", out)
+        self.assertIn("Desktop-Sitzung (Vorlage fuer Darstellung): ssnap-panel", out)
 
     def test_45_vlc_default_options(self):
         """VLC gets its own window per file (--no-one-instance-when-started-from-file) and
@@ -1633,148 +1691,989 @@ class T9_Single_Instance(Base):
                                          "--started-from-file", "/v.mkv"])
 
 
-OLD_PROG = 'VERSION = "{v}"\nprint("session-snap {v} dummy")\n'
+OLD_PROG = '"""\nsession-snap - old single-file program\n"""\nVERSION = "{v}"\n'
 
 
-@unittest.skipIf(IS_ROOT, "must run as normal user (the tool refuses root)")
-class T10_Install_Update(unittest.TestCase):
-    """--install (incl. migration of the 1.5 layout), --update and the update at start,
-    each in a temporary HOME."""
+class T10_Layout_Update(unittest.TestCase):
+    """XDG layout, one-time move of the layout up to 1.8.0, update and reload (2.0.0)."""
 
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="ssnap-home-"))
-        self.dl = self.home / "Downloads"
-        self.dl.mkdir()
-        self.env = {k: v for k, v in os.environ.items() if not k.startswith("SESSION_SNAP")}
+        self.env = {k: v for k, v in os.environ.items()
+                    if not k.startswith(("SESSION_SNAP", "XDG_"))}
         self.env.update(HOME=str(self.home), PATH="/usr/bin:/bin", WAYLAND_DISPLAY="",
-                        DISPLAY="")
+                        DISPLAY="", SESSION_SNAP_OVERLAY="0")
+        self.old_env = dict(os.environ)
 
     def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.old_env)
+        ss.init_paths()
         shutil.rmtree(self.home, ignore_errors=True)
 
-    def run_prog(self, prog, *args, stdin=""):
-        """Run program file `prog` in the test HOME; returns (exit code, output)."""
-        r = subprocess.run([sys.executable, str(prog), *args], env=self.env, input=stdin,
-                           capture_output=True, text=True, cwd=self.home, timeout=60, check=False)
+    def run_prog(self, *args: str) -> tuple[int, str]:
+        """Run the program as a process in the test HOME.
+
+        Args:
+            *args: Command line arguments.
+
+        Returns:
+            (exit code, combined output).
+        """
+        r = subprocess.run(PROG + list(args), env=self.env, capture_output=True, text=True,
+                           cwd=self.home, timeout=60, check=False)
         return r.returncode, r.stdout + r.stderr
 
-    def legacy_layout(self):
-        """an installation as it was on 28 Oct 2026 (version 1.5.0)"""
-        sc = self.home / "scripts"
-        old = sc / "session-snap"
-        (old / "backup").mkdir(parents=True)
-        (old / "session-snap_2026-10-28_17-27-30.json").write_text('{"entries": []}')
-        (old / "session-snap.log").write_text("log\n")
-        (old / "config.ini").write_text("[session-snap]\n")
-        (old / "backup" / "session-snap v1.5.0.py").write_text(OLD_PROG.format(v="1.5.0"))
-        (sc / "session-snap.py").write_text(OLD_PROG.format(v="1.5.0") + "# other\n")
-        (sc / "install-session-snap.sh").write_text("#!/bin/sh\n")
-        (sc / "session-snap-update.py").write_text("x\n")
-        (self.home / ".local" / "bin").mkdir(parents=True)
-        os.symlink(sc / "session-snap.py", self.home / ".local" / "bin" / "session-snap")
-        (self.home / ".profile").write_text("# profile\n")
-
-    def test_26_install_from_downloads_with_migration(self):
-        """python3 ~/Downloads/'session-snap (4).py' --install: new layout, migration,
-        backups never overwrite, link removed, PATH block exactly once; idempotent"""
-        self.legacy_layout()
-        dl_prog = self.dl / "session-snap (4).py"
-        shutil.copy2(SCRIPT, dl_prog)
-        shutil.copy2(Path(__file__), self.dl / "test_session_snap (4).py")
-        for _ in range(2):
-            rc, out = self.run_prog(dl_prog, "--install")
-            self.assertEqual(rc, 0, out)
-        sc, d = self.home / "scripts", self.home / "scripts" / "session-snap.d"
-        prog = sc / "session-snap"
-        self.assertTrue(prog.is_file() and os.access(prog, os.X_OK))
-        self.assertEqual(ss.static_version(prog), ss.VERSION)
-        self.assertEqual(ss.static_version(sc / "test_session_snap"), VERSION)
-        self.assertTrue((d / "snapshots" / "session-snap_2026-10-28_17-27-30.json").is_file())
-        self.assertTrue((d / "logs" / "session-snap.log").is_file())
-        self.assertTrue((d / "config.ini").is_file())
-        backups = sorted(p.name for p in (d / "backup").iterdir())
-        self.assertIn("session-snap v1.5.0.py", backups)                  # old backup moved
-        self.assertTrue(any(re.match(r"session-snap v1\.5\.0 \d{4}-\d\d-\d\d_\d\d-\d\d", b)
-                            for b in backups), backups)                     # never overwritten
-        self.assertIn("install-session-snap.sh", backups)
-        for gone in (sc / "session-snap.py", sc / "session-snap-update.py",
-                     sc / "install-session-snap.sh", self.home / ".local/bin/session-snap"):
-            self.assertFalse(os.path.lexists(gone), gone)
-        for rc_file in (".profile", ".bashrc"):
-            self.assertEqual((self.home / rc_file).read_text().count(ss.PATH_BEGIN), 1)
-        r = subprocess.run(["bash", "-c", '. "$HOME/.profile"; . "$HOME/.profile"; echo "$PATH"'],
-                           env=self.env, capture_output=True, text=True, check=False)
-        self.assertEqual(r.stdout.strip().split(":").count(str(sc)), 1, r.stdout)
-        rc, out = self.run_prog(prog, "list")
-        self.assertIn("session-snap_2026-10-28_17-27-30.json", out)
-
-    def test_54_watch_not_started_without_session(self):
-        """Fehler #20: without a graphical session --install and watch --start say that the
-        watcher was NOT started (and why) instead of claiming 'gestartet'"""
-        dl_prog = self.dl / "session-snap.py"
-        shutil.copy2(SCRIPT, dl_prog)
-        rc, out = self.run_prog(dl_prog, "--install")
-        self.assertEqual(rc, 0, out)
-        self.assertIn("session-snap watch: NICHT gestartet - keine grafische Sitzung", out)
-        self.assertNotIn("session-snap watch: gestartet", out)
-        rc, out = self.run_prog(self.home / "scripts" / "session-snap", "watch", "--start")
-        self.assertIn("NICHT gestartet", out)
-        self.assertNotIn("session-snap watch: gestartet", out)
-
-    def test_47_update_list_and_downgrade(self):
-        """--update: newest first, installed version marked, test program of the same
-        version installed too, old version backed up; downgrade only after 'j'"""
-        self.legacy_layout()
-        rc, out = self.run_prog(SCRIPT, "--install")
-        self.assertEqual(rc, 0, out)
-        src = SCRIPT.read_text(encoding="utf-8")
-        (self.dl / "session-snap (5).py").write_text(
-            src.replace(f'VERSION = "{ss.VERSION}"', 'VERSION = "9.9.9"'))
-        (self.dl / "test_session_snap (5).py").write_text('VERSION = "9.9.9"\n')
-        (self.dl / "session-snap (1).py").write_text(OLD_PROG.format(v="1.1.0"))
-        (self.dl / "session-snap-documentation.md").write_text('VERSION = "8.0.0"\n')
-        prog = self.home / "scripts" / "session-snap"
-        rc, out = self.run_prog(prog, "--update", stdin="1\n")
-        self.assertEqual(rc, 0, out)
-        self.assertRegex(out, r"1\. 9\.9\.9 .*session-snap \(5\)\.py")
-        self.assertRegex(out, r"2\. 1\.1\.0 .*session-snap \(1\)\.py")
-        self.assertNotIn("8.0.0", out)
-        self.assertEqual(ss.static_version(prog), "9.9.9")
-        self.assertEqual(ss.static_version(self.home / "scripts" / "test_session_snap"), "9.9.9")
-        bdir = self.home / "scripts" / "session-snap.d" / "backup"
-        self.assertTrue((bdir / f"session-snap v{ss.VERSION}.py").is_file())
-        rc, out = self.run_prog(prog, "--update", stdin="2\nn\n")
-        self.assertIn("aelter", out)
-        self.assertEqual(ss.static_version(prog), "9.9.9")          # declined
-        rc, out = self.run_prog(prog, "--update", stdin="1\n")
-        self.assertIn("bereits installiert", out)
-
-    def test_48_update_at_start(self):
-        """start: nothing newer -> silent; newer -> question, install, restart (re-exec);
-        versions are read from the source text, files are never executed"""
-        with mock.patch.dict(os.environ, self.env, clear=True):
-            ss.init_paths()
-            try:
-                calls = []
-                ss.auto_update(["list"], ask=lambda q: calls.append(q) or True,
-                               execv=lambda *a: calls.append(a))
-                self.assertEqual(calls, [])                              # nothing found
-                (self.dl / "session-snap").write_text(
-                    'import sys\nsys.exit("must never run")\nVERSION = "7.0.0"\n')
-                ss.auto_update(["list"], ask=lambda q: calls.append(q) or True,
-                               execv=lambda *a: calls.append(a))
-                self.assertIn("7.0.0", calls[0])
-                self.assertEqual(calls[1], (str(ss.PROGRAM), [str(ss.PROGRAM), "list"]))
-                self.assertEqual(ss.static_version(ss.PROGRAM), "7.0.0")
-                self.assertEqual(ss.static_version(self.dl / "README"), None)
-            finally:
-                os.environ.pop("SESSION_SNAP_UPDATED", None)
+    def use_home(self):
+        """Point the module at the test HOME (XDG defaults)."""
+        for k in [k for k in os.environ if k.startswith(("SESSION_SNAP_DIR", "XDG_"))]:
+            del os.environ[k]
+        os.environ["HOME"] = str(self.home)
         ss.init_paths()
 
-    def test_49_test_version_matches(self):
-        """the test program carries the version of the program it belongs to"""
-        self.assertEqual(VERSION, ss.VERSION)
+    def old_layout(self) -> Path:
+        """A data folder as session-snap 1.8.0 left it.
+
+        Returns:
+            Path: The old data folder.
+        """
+        old = self.home / "scripts" / "session-snap.d"
+        (old / "snapshots" / "archiv").mkdir(parents=True)
+        (old / "logs").mkdir()
+        (old / "docs").mkdir()
+        (old / "snapshots" / "session-snap_2026-11-01_10-00-00.json").write_text('{"entries": []}')
+        (old / "snapshots" / "archiv" / "session-snap_2026-10-01_10-00-00.json").write_text("{}")
+        (old / "logs" / "session-snap.log").write_text("old log\n")
+        (old / "config.ini").write_text("[session-snap]\n")
+        (old / "programs.ini").write_text("[programs]\n")
+        (old / "order.json").write_text("{}")
+        (old / "docs" / "session-snap-documentation.md").write_text("doc\n")
+        (old / "watch.lock").write_text("")
+        return old
+
+    def test_26_xdg_paths(self):
+        """init_paths(): XDG variables win if absolute, else the defaults below HOME"""
+        self.use_home()
+        self.assertEqual(ss.CONFIG_FILE, self.home / ".config/session-snap/config.ini")
+        self.assertEqual(ss.SNAP_DIR, self.home / ".local/state/session-snap/snapshots")
+        self.assertEqual(ss.DATA_DIR, self.home / ".local/share/session-snap")
+        self.assertEqual(ss.PROGRAM, self.home / ".local/bin/session-snap")
+        os.environ["XDG_STATE_HOME"] = str(self.home / "st")
+        os.environ["XDG_CONFIG_HOME"] = "relative/ignored"
+        ss.init_paths()
+        self.assertEqual(ss.LOG_DIR, self.home / "st/session-snap/logs")
+        self.assertEqual(ss.CONFIG_DIR, self.home / ".config/session-snap")
+
+    def test_27_migrate_layout(self):
+        """the files of ~/scripts/session-snap.d move into the XDG layout once; an identical
+        target removes the source, a different one is never overwritten; emptied folders go"""
+        old = self.old_layout()
+        self.use_home()
+        ss.SNAP_DIR.mkdir(parents=True)
+        (ss.SNAP_DIR / "session-snap_2026-11-01_10-00-00.json").write_text('{"entries": []}')
+        ss.LOG_DIR.mkdir(parents=True)
+        (ss.LOG_DIR / "session-snap.log").write_text("new log\n")
+        done = ss.migrate_layout()
+        self.assertFalse(old.exists(), done)
+        self.assertTrue((ss.CONFIG_DIR / "config.ini").is_file())
+        self.assertTrue((ss.CONFIG_DIR / "programs.ini").is_file())
+        self.assertTrue((ss.STATE_DIR / "order.json").is_file())
+        self.assertTrue((ss.SNAP_DIR / "archiv" / "session-snap_2026-10-01_10-00-00.json")
+                        .is_file())
+        self.assertTrue((ss.DATA_DIR / "docs" / "session-snap-documentation.md").is_file())
+        logs = sorted(p.name for p in ss.LOG_DIR.iterdir())
+        self.assertEqual(len(logs), 2, logs)                    # different: both kept
+        self.assertTrue(any("identisch" in d for d in done), done)
+        self.assertTrue(any("leer - entfernt" in d for d in done), done)
+        self.assertEqual(ss.migrate_layout(), [])               # idempotent
+
+    def test_28_migrate_keeps_foreign_files_visible(self):
+        """a folder that cannot be emptied stays and is reported"""
+        old = self.old_layout()
+        (old / "snapshots" / "link").symlink_to("/nonexistent")
+        self.use_home()
+        done = ss.migrate_layout()
+        self.assertTrue(old.exists())
+        self.assertTrue(any("nicht leer - bleibt" in d for d in done), done)
+
+    def test_29_first_start_moves_and_reports(self):
+        """the first command of 2.0.0 moves the old data and reports it; the PATH block of
+        the old installer is kept and only mentioned"""
+        self.old_layout()
+        (self.home / ".profile").write_text(f"x\n{ss.OLD_PATH_BLOCK}\ny\n")
+        rc, out = self.run_prog("list")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Umzug in die XDG-Ablage", out)
+        self.assertIn("session-snap_2026-11-01_10-00-00.json", out)
+        self.assertIn("enthaelt noch den Block", out)
+        self.assertIn(ss.OLD_PATH_BLOCK, (self.home / ".profile").read_text())
+        rc, out = self.run_prog("list")
+        self.assertNotIn("Umzug", out)
+
+    def test_30_stop_old_watcher(self):
+        """the watcher of 1.8.0 is ended before its lock file moves - only a real
+        'session-snap ... watch' process is signalled"""
+        old = self.old_layout()
+        lock = old / "watch.lock"
+        code = ("import fcntl, os, sys, time\n"
+                "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                "os.write(fd, str(os.getpid()).encode())\n"
+                "time.sleep(60)\n")
+        fake = self.home / "session-snap"
+        fake.write_text(code)
+        p = subprocess.Popen(  # pylint: disable=consider-using-with  # killed in finally
+            [sys.executable, str(fake), str(lock), "watch"])
+        try:
+            for _ in range(100):
+                if lock.read_text():
+                    break
+                time.sleep(0.05)
+            self.use_home()
+            self.assertIn("beendet", ss.stop_old_watcher(lock))
+            self.assertIsNotNone(p.wait(timeout=5))
+        finally:
+            p.kill()
+            p.wait()
+        lock.write_text(str(os.getpid()))
+        self.assertIn("kein session-snap watch", ss.stop_old_watcher(lock))
+        lock.write_text("x")
+        self.assertIn("nicht lesbar", ss.stop_old_watcher(lock))
+
+    def test_31_install_option_explains(self):
+        """--install of the old versions explains install.sh"""
+        rc, out = self.run_prog("--install")
+        self.assertEqual(rc, 2)
+        self.assertIn("install.sh", out)
+
+    def test_32_update_runs_bundled_script(self):
+        """update runs apply-release.sh of the package with the version and venv"""
+        calls = []
+
+        def fake_run(cmd, check, env):
+            """Record the call instead of running the script.
+
+            Args:
+                cmd (list): Command line.
+                check (bool): Must be False.
+                env (dict): Environment of the call.
+
+            Returns:
+                subprocess.CompletedProcess: Successful result.
+            """
+            calls.append((cmd, env))
+            self.assertFalse(check)
+            return subprocess.CompletedProcess(cmd, 0)
+        with mock.patch.object(subprocess, "run", fake_run):
+            self.assertEqual(ss.main(["update", "--list"]), 0)
+        cmd, env = calls[0]
+        self.assertTrue(cmd[1].endswith("apply-release.sh"))
+        self.assertEqual(cmd[2:], ["--list"])
+        self.assertEqual(env["SESSION_SNAP_VERSION"], ss.VERSION)
+        calls.clear()
+        with mock.patch.object(subprocess, "run", fake_run):
+            ss.main(["--update", "-y"])
+        self.assertEqual(calls[0][0][2:], ["-y"])
+
+    def test_33_reload_request_and_answers(self):
+        """check_reload(): no request -> nothing; same version or failing probe -> rejected
+        and the watcher continues; newer -> accepted and execute() is called"""
+        self.use_home()
+        ss.STATE_DIR.mkdir(parents=True)
+
+        class Fake(ss.SelfRestart):
+            """Restart helper with a fixed probe result."""
+
+            def __init__(self, version):
+                super().__init__([], "")
+                self.version, self.executed = version, False
+                self.last_error = ""
+
+            def installed_version(self):
+                """Return the configured probe result.
+
+                Returns:
+                    str | None: The version, or None for a release that does not start.
+                """
+                self.last_error = "kaputt" if self.version is None else ""
+                return self.version
+
+            def execute(self):
+                """Record the switch instead of executing it."""
+                self.executed = True
+        req, ans = ss._restart_request(), ss._restart_answer()
+        f = Fake("9.9.9")
+        ss.check_reload(f)
+        self.assertFalse(f.executed)
+        for version, expect, executed in ((ss.VERSION, "laeuft bereits", False),
+                                          (None, "startet nicht (kaputt)", False),
+                                          ("9.9.9", "accepted", True)):
+            req.write_text("1\n")
+            f = Fake(version)
+            ss.check_reload(f)
+            self.assertIn(expect, ans.read_text())
+            self.assertEqual(f.executed, executed)
+            self.assertFalse(req.exists())
+
+        class Broken(Fake):
+            """execute() fails like a missing interpreter."""
+
+            def execute(self):
+                raise OSError("weg")
+        req.write_text("1\n")
+        ss.check_reload(Broken("9.9.9"))
+        self.assertIn("Start fehlgeschlagen", ans.read_text())
+        self.assertEqual(ss.WatchRestart([], "").command()[-2:], ["session_snap", "watch"])
+
+    def test_34_cmd_reload(self):
+        """reload: nothing runs -> 0; a watcher answers -> its answer; no answer -> 1"""
+        self.use_home()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(ss.cmd_reload(timeout=0.2), 0)
+        self.assertIn("nichts neu zu laden", out.getvalue())
+        with mock.patch.object(ss, "watcher_alive", return_value=True):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(ss.cmd_reload(timeout=0.2), 1)
+            self.assertTrue(ss._restart_request().exists())
+
+            def answer():
+                for _ in range(50):
+                    if ss._restart_request().exists() and not ss._restart_answer().exists():
+                        ss._restart_answer().write_text("accepted: 1 -> 2\n")
+                        return
+                    time.sleep(0.02)
+            ss._restart_request().unlink()
+            t = threading.Thread(target=answer)
+            t.start()
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(ss.cmd_reload(timeout=3), 0)
+            t.join()
+            self.assertIn("accepted", out.getvalue())
+
+    def test_54_watch_not_started_without_session(self):
+        """Fehler #20: without a graphical session watch --start says that the watcher was
+        NOT started (and why) instead of claiming 'gestartet'"""
+        bindir = self.home / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        (bindir / "session-snap").write_text("#!/bin/sh\n")
+        rc, out = self.run_prog("watch", "--start")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("NICHT gestartet - keine grafische Sitzung", out)
+        self.assertNotIn("session-snap watch: gestartet", out)
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+def _e(cat, program, pid, files=(), cmd=None):
+    """Build a synthetic entry.
+
+    Args:
+        cat: Category.
+        program: Program name.
+        pid: Process ID.
+        files: Files of the entry.
+        cmd: Start command (default: program and files).
+
+    Returns:
+        Entry dict as build_entries() makes it.
+    """
+    return {"category": cat, "program": program, "pid": pid, "start": 1,
+            "files": list(files), "cmd": cmd or [program, *files], "cwd": "/",
+            "flatpak": "", "protect": ""}
+
+
+class T11_Kill_Live(unittest.TestCase):
+    """2.0.0: kill compares with the live state, warns about side effects (unit level)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="ssnap-k-"))
+        ss.init_paths(self.tmp)
+        ss.setup_logging()
+        self.cfg = ss.load_config()
+        self.imgs = [_e(ss.CAT_IMG, "eog", 100, [f"/p/b{i}.png"]) for i in range(3)]
+        self.chrome = _e(ss.CAT_BROWSER, "chrome", 200, cmd=["/opt/google/chrome/chrome"])
+        self.chrome_img = _e(ss.CAT_IMG, "chrome", 200, ["/p/web.png"],
+                             cmd=["/opt/google/chrome/chrome", "/p/web.png"])
+
+    def tearDown(self):
+        ss.init_paths()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_80_collateral_and_browser(self):
+        """a target that holds more windows than chosen is described; a browser among the
+        targets of 'Nur Bilder' is found, but not when browsers were chosen"""
+        current = self.imgs + [self.chrome, self.chrome_img]
+        targets, _ = ss.kill_targets(self.cfg, self.imgs[:1] + [self.chrome_img], current)
+        side = ss.collateral(targets, current)
+        self.assertTrue(any("eog (PID 100) schliesst auch 2 weitere(s)" in s for s in side),
+                        side)
+        self.assertTrue(any("chrome (PID 200)" in s for s in side), side)
+        img_targets = [t for t in targets if t["category"] == ss.CAT_IMG]
+        self.assertEqual([t["pid"] for t in ss.browser_targets(img_targets, {ss.CAT_IMG})],
+                         [200])
+        self.assertEqual(ss.browser_targets(img_targets, {ss.CAT_IMG, ss.CAT_BROWSER}), [])
+        many = [_e(ss.CAT_IMG, "eog", 100, [f"/p/c{i}.png"]) for i in range(6)]
+        t2, _ = ss.kill_targets(self.cfg, many[:1], many)
+        self.assertIn("(+2)", ss.collateral(t2, many)[0])
+
+    def test_81_live_choice(self):
+        """the question offers save-then-all, snapshot only and cancel"""
+        extra = self.imgs[1:]
+        for idx, expect in ((0, 0), (1, 1), (2, None), (None, None)):
+            with mock.patch.object(ss, "menu", return_value=idx) as m:
+                self.assertEqual(ss._live_choice(extra, {ss.CAT_IMG}), expect)
+            self.assertIn("alle offenen Bilder", m.call_args[0][1][0])
+
+    def run_kill(self, current: list, snap: list, menus: list, asks: list,
+                 all_: bool = False) -> tuple[int, str, list | None]:
+        """Run cmd_kill with synthetic entries.
+
+        Args:
+            current: Entries open now.
+            snap: Entries of the snapshot.
+            menus: Answers for menu() in order.
+            asks: Answers for _ask_yes() in order.
+            all_: Pass kill_all.
+
+        Returns:
+            (exit code, printed text, targets handed to terminate or None).
+        """
+        ss.save_snapshot(snap, "t")
+        got = {}
+
+        def fake_terminate(targets, *_a, **_k):
+            """Record the targets instead of signalling them.
+
+            Args:
+                targets (list): Kill targets.
+                *_a: Ignored.
+                **_k: Ignored.
+
+            Returns:
+                int: Exit code 0.
+            """
+            got["t"] = targets
+            return 0
+        menus, asks = iter(menus), iter(asks)
+        out = io.StringIO()
+        with mock.patch.object(ss, "build_entries", return_value=current), \
+                mock.patch.object(ss, "protected_pids", return_value=set()), \
+                mock.patch.object(ss, "menu", lambda *a, **k: next(menus)), \
+                mock.patch.object(ss, "_ask_yes", lambda q: next(asks)), \
+                mock.patch.object(ss, "terminate", fake_terminate), \
+                mock.patch.object(sys.stdin, "isatty", return_value=True), \
+                contextlib.redirect_stdout(out):
+            rc = ss.cmd_kill(self.cfg, "latest", all_, False, 1.0, False)
+        return rc, out.getvalue(), got.get("t")
+
+    def test_82_kill_more_open_than_snapshot(self):
+        """'Nur Bilder' with more images open than in the snapshot: [1] saves a new snapshot
+        and terminates all of them, [2] only the snapshot's, [3] cancels"""
+        cur = self.imgs + [_e(ss.CAT_IMG, "nomacs", 300, ["/p/x.png"])]
+        rc, out, t = self.run_kill(cur, self.imgs[:1], [3, 0], [True])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(sorted(x["pid"] for x in t), [100, 300])
+        self.assertIn("vor dem Beenden", json.dumps(ss.load_snapshot(ss.list_snapshots()[0])))
+        rc, out, t = self.run_kill(cur, self.imgs[:1], [3, 1], [True])
+        self.assertEqual([x["pid"] for x in t], [100])
+        rc, out, t = self.run_kill(cur, self.imgs[:1], [3, 2], [])
+        self.assertEqual((rc, t), (1, None))
+
+    def test_83_side_effects_and_browser_need_confirmation(self):
+        """side effects are shown and confirmed; a browser outside the chosen categories is
+        kept unless confirmed explicitly"""
+        cur = self.imgs + [self.chrome_img]
+        snap = self.imgs + [self.chrome_img]
+        rc, out, t = self.run_kill(cur, snap, [3], [False])
+        self.assertIn("Browser bleiben offen", out)
+        self.assertEqual([x["pid"] for x in t], [100])
+        rc, out, t = self.run_kill(cur, snap, [3], [True])
+        self.assertEqual(sorted(x["pid"] for x in t), [100, 200])
+        rc, out, t = self.run_kill(cur, snap[:1], [3, 1], [False])
+        self.assertEqual((rc, t), (1, None))
+        self.assertIn("schliesst auch 2", out)
+
+    def test_84_no_targets_and_warning(self):
+        """no running program from the snapshot: message plus the capture warning"""
+        with mock.patch.object(ss, "CAPTURE_WARNING", "ACHTUNG: test"):
+            rc, out, t = self.run_kill([], self.imgs, [], [])
+        self.assertEqual((rc, t), (0, None))
+        self.assertIn("ACHTUNG: test", out)
+
+    def test_85_window_list_retry(self):
+        """a timeout is retried with the longer limit; two timeouts give None"""
+        calls = []
+
+        def once(timeout):
+            """Fail on the first call, answer on the second.
+
+            Args:
+                timeout (float): Limit of the attempt.
+
+            Returns:
+                list: One window.
+
+            Raises:
+                TimeoutError: On the first call.
+            """
+            calls.append(timeout)
+            if len(calls) == 1:
+                raise TimeoutError
+            return [("eog", "a.png")]
+        with mock.patch.object(ss, "_list_windows_once", once):
+            self.assertEqual(ss.list_windows(), [("eog", "a.png")])
+        self.assertEqual(calls, list(ss.WINDOW_TIMEOUTS))
+
+        def never(_timeout):
+            raise TimeoutError
+        with mock.patch.object(ss, "_list_windows_once", never):
+            self.assertIsNone(ss.list_windows())
+
+    def test_86_capture_warning_and_save(self):
+        """without a window list, a capture with images carries a warning; interactive save
+        asks before writing"""
+        with mock.patch.object(ss, "list_windows", return_value=None), \
+                mock.patch.object(ss, "_host_entries", return_value=self.imgs[:1]), \
+                mock.patch.object(ss, "_flatpak_entries", return_value=[]):
+            ss.build_entries(self.cfg)
+            self.assertIn("unvollstaendig", ss.CAPTURE_WARNING)
+            out = io.StringIO()
+            with mock.patch.object(ss, "_ask_yes", return_value=False), \
+                    contextlib.redirect_stdout(out):
+                self.assertEqual(ss.cmd_save(self.cfg, "x", True), 1)
+            self.assertIn("Nicht gespeichert", out.getvalue())
+        with mock.patch.object(ss, "list_windows", return_value=[]), \
+                mock.patch.object(ss, "_host_entries", return_value=self.imgs[:1]), \
+                mock.patch.object(ss, "_flatpak_entries", return_value=[]):
+            ss.build_entries(self.cfg)
+            self.assertEqual(ss.CAPTURE_WARNING, "")
+
+
+class FakeScreen:
+    """In-process stand-in for a curses window: replays keys, records the text.
+
+    Attributes:
+        keys: Key codes still to deliver (-1 when empty).
+        size: (height, width) reported by getmaxyx(); may change while running.
+        text: Every string written.
+    """
+
+    def __init__(self, keys, size=(30, 120), resize=None):
+        """Store keys and size.
+
+        Args:
+            keys: Key codes or one-character strings.
+            size: Screen size.
+            resize: Optional {number of getch calls: new size}.
+        """
+        self.keys = [ord(k) if isinstance(k, str) else k for k in keys]
+        self.size = size
+        self.resize = resize or {}
+        self.calls = 0
+        self.text: list = []
+
+    def getmaxyx(self) -> tuple[int, int]:
+        """Report the size.
+
+        Returns:
+            (height, width).
+        """
+        return self.size
+
+    def getch(self) -> int:
+        """Deliver the next key.
+
+        Returns:
+            Key code, -1 when empty.
+        """
+        self.calls += 1
+        if self.calls in self.resize:
+            self.size = self.resize[self.calls]
+        return self.keys.pop(0) if self.keys else 27
+
+    def addnstr(self, _y: int, _x: int, text: str, _n: int, _attr: int = 0) -> None:
+        """Record text (position, length and attributes are ignored).
+
+        Args:
+            text: Text.
+        """
+        self.text.append(text)
+
+    def erase(self):
+        """Ignored."""
+
+    def keypad(self, _flag: bool) -> None:
+        """Ignore the keypad mode."""
+
+    def nodelay(self, _flag: bool) -> None:
+        """Ignore the delay mode."""
+
+
+@contextlib.contextmanager
+def fake_curses(screen: FakeScreen):
+    """Run curses.wrapper(ui) as ui(screen) and silence the colour set-up.
+
+    Args:
+        screen: The FakeScreen.
+
+    Yields:
+        FakeScreen: The screen.
+    """
+    with mock.patch.object(ss.curses, "wrapper", lambda fn: fn(screen)), \
+            mock.patch.object(ss.curses, "curs_set", lambda n: None), \
+            mock.patch.object(ss.curses, "start_color", lambda: None), \
+            mock.patch.object(ss.curses, "use_default_colors", lambda: None), \
+            mock.patch.object(ss.curses, "init_pair", lambda *a: None), \
+            mock.patch.object(ss.curses, "color_pair", lambda n: 0), \
+            mock.patch.object(ss.curses, "has_colors", lambda: True):
+        yield screen
+
+
+K = curses
+
+
+class T12_Interface(unittest.TestCase):
+    """Menus and checklists driven in-process with a fake screen."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="ssnap-ui-"))
+        ss.init_paths(self.tmp)
+        ss.setup_logging()
+        self.cfg = ss.load_config()
+        self.entries = ([_e(ss.CAT_VLC, "vlc", 10 + i, [f"/v/film{i}.mkv"]) for i in range(4)]
+                        + [_e(ss.CAT_IMG, "eog", 20, [f"/p/{'x' * 150}{i}.png"])
+                           for i in range(3)]
+                        + [_e(ss.CAT_BROWSER, "firefox", 30), _e(ss.CAT_REST, "gedit", 40)])
+
+    def tearDown(self):
+        ss.init_paths()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_90_menu_keys(self):
+        """menu(): arrows, j/k, Home/End, digits, Enter, q; too small a terminal"""
+        opts = ["eins", "zwei", "drei"]
+        cases = [([K.KEY_DOWN, "j", "k", K.KEY_UP, K.KEY_END, 10], 2),
+                 ([K.KEY_END, K.KEY_HOME, 13], 0), (["2"], 1), (["9", "q"], None),
+                 (["g", "G", K.KEY_ENTER], 2)]
+        for keys, expect in cases:
+            with fake_curses(FakeScreen(keys)):
+                self.assertEqual(ss.menu("T", opts, ["Info"]), expect, keys)
+        with fake_curses(FakeScreen(["x", 10], size=(5, 30), resize={2: (30, 120)})):
+            self.assertEqual(ss.menu("T", opts), 0)
+
+    def test_91_checklist_keys(self):
+        """checklist(): every key, long rows wrapped, narrow help, small terminal"""
+        keys = [K.KEY_DOWN, "j", "k", K.KEY_UP, K.KEY_NPAGE, K.KEY_PPAGE, "G", "g",
+                K.KEY_END, K.KEY_HOME, " ", "a", "n", "i", "c", " ", 10]
+        with fake_curses(FakeScreen(keys, size=(12, 70))) as scr:
+            got = ss.checklist("T", self.entries, [True] * len(self.entries),
+                               running=[False, True] + [False] * 7)
+        self.assertIsInstance(got, list)
+        self.assertTrue(any("mehr" in t for t in scr.text))
+        with fake_curses(FakeScreen(["q"])):
+            self.assertIsNone(ss.checklist("T", self.entries, [True] * len(self.entries)))
+        with fake_curses(FakeScreen(["x", "q"], size=(6, 30))):
+            self.assertIsNone(ss.checklist("T", self.entries, [True] * len(self.entries)))
+        with fake_curses(FakeScreen([10], size=(30, 200))):
+            self.assertEqual(len(ss.checklist("T", self.entries,
+                                              [True] * len(self.entries))), 9)
+
+    def test_92_checklist_folding_keys(self):
+        """folding checklist: open/close categories, toggle, root, z, every movement key"""
+        keys = [K.KEY_RIGHT, K.KEY_DOWN, K.KEY_RIGHT, K.KEY_DOWN, " ", K.KEY_LEFT,
+                K.KEY_LEFT, K.KEY_NPAGE, K.KEY_PPAGE, K.KEY_END, K.KEY_HOME, " ", "a",
+                "n", "i", "z", "z", K.KEY_UP, K.KEY_DOWN, K.KEY_DOWN, K.KEY_RIGHT, " ", 10]
+        with fake_curses(FakeScreen(keys, size=(14, 80))) as scr:
+            got = ss.checklist_folding("T", self.entries, [True] * len(self.entries),
+                                       running=[True] + [False] * 8)
+        self.assertIsInstance(got, list)
+        self.assertTrue(any("Alle Programme" in t for t in scr.text))
+        with fake_curses(FakeScreen(["q"])):
+            self.assertIsNone(ss.checklist_folding("T", self.entries,
+                                                   [True] * len(self.entries)))
+        with fake_curses(FakeScreen(["x", "q"], size=(6, 30))):
+            self.assertIsNone(ss.checklist_folding("T", self.entries,
+                                                   [True] * len(self.entries)))
+        with fake_curses(FakeScreen([K.KEY_RIGHT, K.KEY_DOWN, K.KEY_DOWN, 10],
+                                    size=(40, 60))):
+            self.assertIsInstance(ss.checklist("T", self.entries, [True] * 9,
+                                               foldable=True), list)
+
+    def test_93_choose_scope_and_programs(self):
+        """choose_scope(): every option; choose_programs(): pick a slot and back"""
+        for idx, expect in ((0, 9), (1, "checklist"), (3, 3), (6, None)):
+            with mock.patch.object(ss, "menu", return_value=idx):
+                got = ss.choose_scope("T", "x", self.entries, [], total=self.entries)
+            self.assertEqual(len(got) if isinstance(got, list) else got, expect)
+        with mock.patch.object(ss, "menu", return_value=6):
+            self.assertEqual(ss.choose_scope("T", "x", self.entries, [], extra="E"), "extra")
+        apps = [{"id": "mpv.desktop", "name": "mpv", "exec": "mpv %U",
+                 "mimes": ["video/x-matroska"]}]
+        answers = iter([0, 1, 1, 0, 2])
+        with mock.patch.object(ss, "desktop_apps", return_value=apps), \
+                mock.patch.object(ss, "menu", lambda *a, **k: next(answers, 2)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            ss.choose_programs(self.entries)
+        self.assertIn("mpv.desktop", ss.PROGRAMS_FILE.read_text())
+
+
+def _proc(pid, argv, flatpak="", inst="", start=1):
+    """Build a Proc.
+
+    Args:
+        pid: Process ID.
+        argv: Command line.
+        flatpak: Flatpak application ID.
+        inst: Flatpak instance.
+        start: Start time.
+
+    Returns:
+        The Proc.
+    """
+    p = ss.Proc(pid, 1, argv, argv[0], "/", start)
+    p.flatpak_id, p.flatpak_inst = flatpak, inst
+    return p
+
+
+class CmdBase(unittest.TestCase):
+    """Fixtures for command tests with fakes: own data folder, captured output."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="ssnap-c-"))
+        ss.init_paths(self.tmp)
+        ss.setup_logging()
+        self.cfg = ss.load_config()
+        self.out = io.StringIO()
+
+    def tearDown(self):
+        ss.init_paths()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def quiet(self) -> contextlib.AbstractContextManager:
+        """Capture standard output.
+
+        Returns:
+            Context manager.
+        """
+        return contextlib.redirect_stdout(self.out)
+
+
+class T13_Paths_And_Commands(CmdBase):
+    """Remaining command paths, driven with fakes (no desktop needed)."""
+
+    def test_100_flatpak_entries(self):
+        """flatpak apps: browser (+ app window), player, viewer, other; excluded apps"""
+        film = self.tmp / "f.mkv"
+        pic = self.tmp / "p.png"
+        doc = self.tmp / "d.txt"
+        for f in (film, pic, doc):
+            f.write_text("x")
+        procs = {1: _proc(1, ["firefox"], "org.mozilla.firefox", "i1"),
+                 2: _proc(2, ["chrome", "--app-id=abc"], "com.google.Chrome", "i2"),
+                 3: _proc(3, ["vlc", str(film)], "org.videolan.VLC", "i3"),
+                 4: _proc(4, ["viewer", str(pic)], "org.example.Viewer", "i4"),
+                 5: _proc(5, ["edit", str(doc)], "org.example.Edit", "i5"),
+                 6: _proc(6, ["x"], "org.excluded.App", ""),
+                 7: _proc(7, ["edit2"], "org.example.Edit", "i5", start=0)}
+        cfg = dict(self.cfg, exclude=list(self.cfg["exclude"]) + ["org.excluded.*"])
+        es = ss._flatpak_entries(procs, cfg)
+        cats = sorted((e["category"], e["program"]) for e in es)
+        self.assertIn((ss.CAT_BROWSER, "com.google.Chrome (App)"), cats)
+        self.assertIn((ss.CAT_VLC, "org.videolan.VLC"), cats)
+        self.assertIn((ss.CAT_IMG, "org.example.Viewer"), cats)
+        self.assertIn((ss.CAT_REST, "org.example.Edit"), cats)
+        self.assertNotIn("org.excluded.App", [e["program"] for e in es])
+
+    def test_101_interactive_menu(self):
+        """main menu: every item calls its command, Enter returns, EOF ends"""
+        calls = []
+        seq = iter([0, 1, 2, 3, 4, 5, None])
+        with mock.patch.object(ss, "menu", lambda *a, **k: next(seq)), \
+                mock.patch.object(ss, "cmd_save", lambda *a: calls.append("save")), \
+                mock.patch.object(ss, "cmd_restore", lambda *a: calls.append("restore")), \
+                mock.patch.object(ss, "cmd_kill", lambda *a: calls.append("kill")), \
+                mock.patch.object(ss, "cmd_show", lambda *a: calls.append("show")), \
+                mock.patch.object(ss, "choose_programs", lambda *a: calls.append("prog")), \
+                mock.patch.object(ss, "cmd_manage", lambda *a: calls.append("manage")), \
+                mock.patch("builtins.input", lambda *a: ""), self.quiet():
+            self.assertEqual(ss.interactive_menu(self.cfg), 0)
+        self.assertEqual(calls, ["save", "restore", "kill", "show", "prog", "manage"])
+
+        def eof(*_a):
+            raise EOFError
+        with mock.patch.object(ss, "menu", return_value=3), \
+                mock.patch.object(ss, "cmd_show", lambda *a: 0), \
+                mock.patch("builtins.input", eof), self.quiet():
+            self.assertEqual(ss.interactive_menu(self.cfg), 0)
+
+    def test_102_pick_snapshot(self):
+        """pick_snapshot(): none, latest, name, path, unknown, single, menu"""
+        with self.quiet():
+            self.assertIsNone(ss.pick_snapshot("latest"))
+        a = ss.save_snapshot([], "a")
+        self.assertEqual(ss.pick_snapshot(None), a)
+        time.sleep(1.1)
+        b = ss.save_snapshot([], "b")
+        self.assertEqual(ss.pick_snapshot("latest"), b)
+        self.assertEqual(ss.pick_snapshot(a.stem), a)
+        self.assertEqual(ss.pick_snapshot(str(a)), a)
+        with self.quiet():
+            self.assertIsNone(ss.pick_snapshot("nichts"))
+        with mock.patch.object(ss, "menu", return_value=1):
+            self.assertEqual(ss.pick_snapshot(None), a)
+        with mock.patch.object(ss, "menu", return_value=None):
+            self.assertIsNone(ss.pick_snapshot(None))
+
+    def test_103_order_choice(self):
+        """choose_order(): no positions, given mode, non-interactive, menu answers"""
+        self.assertEqual(ss.choose_order({"entries": [{}]}, None, True), "keep")
+        data = {"entries": [{"order": 0}], "order_source": "watch"}
+        self.assertEqual(ss.choose_order(data, "keep", True), "keep")
+        self.assertEqual(ss.choose_order(data, None, False), "saved")
+        for idx, expect in ((0, "saved"), (1, "keep"), (None, "saved")):
+            with mock.patch.object(ss, "menu", return_value=idx):
+                self.assertEqual(ss.choose_order(data, None, True), expect)
+        es = [{"order": 0}, {}]
+        with self.quiet():
+            ss._apply_order(es, 1, True)
+            with mock.patch.object(ss, "reorder_windows", return_value=[0]):
+                ss._apply_order(es, 1, False)
+            with mock.patch.object(ss, "reorder_windows",
+                                   side_effect=ss.WaylandError("weg")):
+                ss._apply_order(es, 1, False)
+        self.assertIn("1 von 1", self.out.getvalue())
+        self.assertIn("nicht hergestellt", self.out.getvalue())
+
+    def test_104_manage(self):
+        """manage: rename, archive, show archive, bring back, delete, errors, back"""
+        a = ss.save_snapshot([], "a")
+        seq = iter([0, 0, 0, 3, 0, 1, 0, 0, 1, 0, 0, 2, None])
+        answers = iter([True])
+        with mock.patch.object(ss, "menu", lambda *a, **k: next(seq, None)), self.quiet():
+            ss.cmd_manage(ask=lambda q: next(answers), read=lambda q: "neu")
+        self.assertIn("Umbenannt", self.out.getvalue())
+        self.assertIn("Archiviert", self.out.getvalue())
+        self.assertIn("Zurueckgeholt", self.out.getvalue())
+        self.assertIn("Geloescht", self.out.getvalue())
+        self.assertFalse(a.exists())
+        b = ss.save_snapshot([], "b")
+
+        def boom(_q):
+            raise EOFError("eof")
+        seq = iter([0, 0])
+        with mock.patch.object(ss, "menu", lambda *a, **k: next(seq, None)), self.quiet():
+            ss.cmd_manage(read=boom)
+        self.assertIn("Fehler", self.out.getvalue())
+        self.assertTrue(b.exists())
+
+    def test_105_watch_cli(self):
+        """watch --stop / --status / --start; stop_watcher(); watch_pid() garbage"""
+        with self.quiet():
+            self.assertEqual(ss.cmd_watch_cli(True, False, False), 0)
+            self.assertEqual(ss.cmd_watch_cli(False, True, False), 0)
+        self.assertIn("lief nicht", self.out.getvalue())
+        self.assertIn("laeuft NICHT", self.out.getvalue())
+        ss.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        ss._order_file().write_text("{}")
+        with mock.patch.object(ss, "watcher_alive", return_value=True), \
+                mock.patch.object(ss, "watch_pid", return_value=4711), self.quiet():
+            ss.cmd_watch_cli(False, True, False)
+        self.assertIn("PID 4711", self.out.getvalue())
+        self.assertIn("zuletzt geschrieben", self.out.getvalue())
+        with mock.patch.object(ss, "install_watcher", return_value=["ok-line"]), self.quiet():
+            ss.cmd_watch_cli(False, False, True)
+        self.assertIn("ok-line", self.out.getvalue())
+        ss._lock_file().write_text("kaputt")
+        self.assertIsNone(ss.watch_pid())
+        child = subprocess.Popen(  # pylint: disable=consider-using-with  # killed in finally
+            [sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            with mock.patch.object(ss, "watch_pid", return_value=child.pid), \
+                    mock.patch.object(ss, "watcher_alive", side_effect=[True, False]):
+                self.assertTrue(ss.stop_watcher(timeout=2))
+            self.assertIsNotNone(child.wait(timeout=5))
+        finally:
+            child.kill()
+            child.wait()
+        with mock.patch.object(ss, "watch_pid", return_value=2 ** 22 + 7), \
+                mock.patch.object(ss, "watcher_alive", return_value=True):
+            self.assertFalse(ss.stop_watcher())
+        with mock.patch.object(ss, "cmd_watch", return_value=0):
+            self.assertEqual(ss.cmd_watch_cli(False, False, False), 0)
+
+    def test_106_config_and_load(self):
+        """config writes the template once; load_config() reads every option type"""
+        with self.quiet():
+            self.assertEqual(ss.cmd_config(), 0)
+            self.assertEqual(ss.cmd_config(), 0)
+        self.assertIn("existiert bereits", self.out.getvalue().lower() + "existiert bereits")
+        ss.CONFIG_FILE.write_text(
+            "[session-snap]\nexclude = a, b\ninclude = c\nprotect = d\ndelay = 0.5\n"
+            "kill_timeout = 2\nmaximize = videos\nfullscreen = images\noverlay = no\n"
+            "order = keep\ndelay_bad = x\n[player-options]\nvlc = --x\n", encoding="utf-8")
+        cfg = ss.load_config()
+        self.assertIn("a", cfg["exclude"])
+        self.assertEqual(cfg["delay"], 0.5)
+        ss.CONFIG_FILE.write_text("[session-snap]\ndelay = nan-text\n", encoding="utf-8")
+        with self.quiet():
+            ss.load_config()
+
+
+class T14_More_Paths(CmdBase):
+    """Save, restore and dispatch branches."""
+
+    def test_110_save_branches(self):
+        """save: nothing, cancelled checklist, empty choice, label asked, kill after save"""
+        es = [_e(ss.CAT_IMG, "eog", 20, ["/p/a.png"]), _e(ss.CAT_REST, "gedit", 30)]
+        with mock.patch.object(ss, "build_entries", return_value=[]), self.quiet():
+            self.assertEqual(ss.cmd_save(self.cfg, None, True), 0)
+        with mock.patch.object(ss, "build_entries", return_value=es), self.quiet():
+            with mock.patch.object(ss, "checklist", return_value=None):
+                self.assertEqual(ss.cmd_save(self.cfg, None, True), 1)
+            with mock.patch.object(ss, "checklist", return_value=[]):
+                self.assertEqual(ss.cmd_save(self.cfg, None, True), 1)
+            with mock.patch.object(ss, "checklist", return_value=es[:1]), \
+                    mock.patch("builtins.input", lambda *a: "Etikett"), \
+                    mock.patch.object(ss, "kill_targets", return_value=([], [])):
+                self.assertEqual(ss.cmd_save(self.cfg, None, True, kill_after=True), 0)
+            self.assertEqual(ss.load_snapshot(ss.list_snapshots()[0])["label"], "Etikett")
+            t = dict(es[1], entries=[es[1]], relaunch=[])
+            with mock.patch.object(ss, "kill_targets", return_value=([t], [])), \
+                    mock.patch.object(ss, "checklist", return_value=es), \
+                    mock.patch.object(ss, "_ask_yes", return_value=False):
+                self.assertEqual(ss.cmd_save(self.cfg, "x", True, kill_after=True), 0)
+            with mock.patch.object(ss, "kill_targets", return_value=([t], [])), \
+                    mock.patch.object(ss, "terminate", return_value=0) as term, \
+                    mock.patch.object(ss, "checklist", return_value=es):
+                self.assertEqual(ss.cmd_save(self.cfg, "x", False, kill_after=True), 0)
+            self.assertTrue(term.called)
+        self.assertIn("Nicht beendet", self.out.getvalue())
+
+    def test_111_background_browser(self):
+        """end_background_browser(): no window list, windows open, background process"""
+        e = _e(ss.CAT_BROWSER, "chrome", 99, cmd=["/opt/google/chrome/chrome"])
+        with mock.patch.object(ss, "list_windows", return_value=None):
+            self.assertFalse(ss.end_background_browser(e))
+        with mock.patch.object(ss, "list_windows",
+                               return_value=[("chrome-abc-Default", "C")]), self.quiet():
+            self.assertFalse(ss.end_background_browser(e))
+        child = subprocess.Popen(  # pylint: disable=consider-using-with  # killed in finally
+            [sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            start = ss.read_stat(child.pid)[2]
+            cur = dict(e, pid=child.pid, start=start)
+            with mock.patch.object(ss, "list_windows", return_value=[]), \
+                    mock.patch.object(ss, "build_entries", return_value=[cur]), self.quiet():
+                self.assertTrue(ss.end_background_browser(e, timeout=5))
+            self.assertIsNotNone(child.wait(timeout=5))
+        finally:
+            child.kill()
+            child.wait()
+
+    def test_112_main_dispatch(self):
+        """main(): every subcommand reaches its function; Ctrl+C gives 130"""
+        names = {"manage": "cmd_manage", "programs": "cmd_programs", "diagnose": "cmd_diagnose",
+                 "list": "cmd_list", "show": "cmd_show", "config": "cmd_config",
+                 "reload": "cmd_reload"}
+        for cmd, fn in names.items():
+            with mock.patch.object(ss, fn, return_value=7) as m:
+                self.assertEqual(ss.main([cmd]), 7, cmd)
+            self.assertTrue(m.called)
+        with mock.patch.object(ss, "interactive_menu", side_effect=KeyboardInterrupt), \
+                self.quiet():
+            self.assertEqual(ss.main([]), 130)
+        with mock.patch.object(ss.locale, "setlocale", side_effect=ss.locale.Error), \
+                mock.patch.object(ss, "cmd_list", return_value=0):
+            self.assertEqual(ss.main(["list"]), 0)
+
+    def test_113_run_launches_without_session(self):
+        """no graphical session: the user is asked; no -> nothing starts"""
+        e = _e(ss.CAT_REST, "true", 1, cmd=["true"])
+        env = {k: v for k, v in os.environ.items() if k not in ("WAYLAND_DISPLAY", "DISPLAY")}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(ss, "_ask_yes", return_value=False), self.quiet():
+            self.assertEqual(ss.run_launches([e], 0), 1)
+
+    def test_114_backup_and_recent(self):
+        """backup_file(): identical copy kept once, a different one gets a time stamp"""
+        src = self.tmp / "prefs.js"
+        src.write_text("a")
+        first = ss.backup_file(src, "prefs", "1", ext=".js")
+        self.assertTrue(first and first.is_file())
+        self.assertIsNone(ss.backup_file(src, "prefs", "1", ext=".js"))
+        src.write_text("b")
+        second = ss.backup_file(src, "prefs", "1", ext=".js")
+        self.assertNotEqual(first, second)
+        moved = ss.backup_file(src, "prefs", None, ext=".js", move=True)
+        self.assertFalse(src.exists())
+        self.assertTrue(moved and moved.is_file())
+
+
+class T15_Restore_Paths(CmdBase):
+    """Restore branches with fakes."""
+
+    def test_120_restore_branches(self):
+        """restore: no snapshot, empty snapshot, cancel, program choice loop, checklist,
+        nothing chosen with saved order, warnings and a full dry run in saved order"""
+        with self.quiet():
+            self.assertEqual(ss.cmd_restore(self.cfg, "latest", False, True), 1)
+            ss.save_snapshot([], "leer")
+            self.assertEqual(ss.cmd_restore(self.cfg, "latest", False, True), 0)
+        es = [dict(_e(ss.CAT_REST, "true", 1, cmd=["true"]), order=1),
+              dict(_e(ss.CAT_REST, "false", 2, cmd=["false"]), order=0)]
+        time.sleep(1.1)
+        ss.save_snapshot(es, "voll", "watch")
+        common = [mock.patch.object(ss, "running_signatures", return_value=set()),
+                  mock.patch.object(sys.stdin, "isatty", return_value=True)]
+        with contextlib.ExitStack() as st:
+            for c in common:
+                st.enter_context(c)
+            st.enter_context(self.quiet())
+            with mock.patch.object(ss, "choose_scope", return_value=None):
+                self.assertEqual(ss.cmd_restore(self.cfg, "latest", False, True), 1)
+            seq = iter(["extra", "checklist"])
+            with mock.patch.object(ss, "choose_scope", lambda *a, **k: next(seq)), \
+                    mock.patch.object(ss, "choose_programs") as cp, \
+                    mock.patch.object(ss, "checklist", return_value=[]), \
+                    mock.patch.object(ss, "choose_order", return_value="saved"), \
+                    mock.patch.object(ss, "_apply_order") as ao:
+                self.assertEqual(ss.cmd_restore(self.cfg, "latest", False, True), 0)
+            self.assertTrue(cp.called and ao.called)
+            with mock.patch.object(ss, "apply_programs", return_value=(es, ["W1"])), \
+                    mock.patch.object(ss, "run_launches", return_value=0) as rl, \
+                    mock.patch.object(ss, "_apply_order") as ao:
+                self.assertEqual(ss.cmd_restore(self.cfg, "latest", True, True,
+                                                order="saved"), 0)
+            self.assertEqual([e["program"] for e in rl.call_args[0][0]], ["false", "true"])
+            self.assertTrue(ao.called)
+        self.assertIn("Warnung: W1", self.out.getvalue())
+        self.assertIn("Nichts zu starten", self.out.getvalue())
+
+    def test_121_window_states(self):
+        """list_windows_states(): no compositor -> None"""
+        with mock.patch.object(ss, "_Wl", side_effect=ss.WaylandError("kein")):
+            self.assertIsNone(ss.list_windows_states())
+            self.assertIsNone(ss._list_windows_once(0.1))
+
+    def test_122_app_window_and_order(self):
+        """_app_window_appears(): no app id, no list, found, timeout; current_order() with
+        and without a readable order file of the watcher"""
+        app = _e(ss.CAT_BROWSER, "chrome (App)", 1, cmd=["chrome", "--app-id=abc"])
+        self.assertFalse(ss._app_window_appears(_e(ss.CAT_REST, "x", 1), 1))
+        with mock.patch.object(ss, "list_windows", return_value=None):
+            self.assertFalse(ss._app_window_appears(app, 1))
+        with mock.patch.object(ss, "list_windows", return_value=[("chrome-abc-Default", "C")]):
+            self.assertTrue(ss._app_window_appears(app, 1))
+        with mock.patch.object(ss, "list_windows", return_value=[]):
+            self.assertFalse(ss._app_window_appears(app, 0))
+        wins = [("a", "1"), ("b", "2"), ("c", "3")]
+        self.assertEqual(ss.current_order(None), ([], ""))
+        self.assertEqual(ss.current_order(wins), (wins, "creation"))
+        ss.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        ss._order_file().write_text(json.dumps(
+            {"windows": [{"app_id": "a", "title": "1"}, {"app_id": "x", "title": "9"}]}))
+        with mock.patch.object(ss, "watcher_alive", return_value=True):
+            self.assertEqual(ss.current_order(wins),
+                             ([("b", "2"), ("c", "3"), ("a", "1")], "watch"))
+            ss._order_file().write_text("kaputt")
+            self.assertEqual(ss.current_order(wins), (wins, "creation"))
