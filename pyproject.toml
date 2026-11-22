@@ -1,45 +1,108 @@
-# Tool configuration only - session-snap is a single executable file, not a package
-# (the self-update from the download folder depends on that form, see docs/developer.md).
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
 
+[project]
+name = "session-snap"
+dynamic = ["version"]
+description = "Record, restore and terminate the open videos, images, browsers and programs of a Pop!_OS COSMIC session."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "peddanet" }]
+keywords = ["cosmic", "wayland", "session", "restore", "pop-os"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: POSIX :: Linux",
+  "Environment :: Console :: Curses",
+  "Topic :: Desktop Environment",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7", "pytest-cov>=4", "pylint>=3", "mypy>=1.8",
+  "pycodestyle>=2.11", "bandit[toml]>=1.7",
+]
+
+[project.scripts]
+session-snap = "session_snap.cli:run"
+
+[tool.setuptools.dynamic]
+version = { attr = "session_snap.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"session_snap.update" = ["*.sh"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+# resource leaks (unclosed files, sockets) fail the test run
+filterwarnings = [
+  "error::ResourceWarning",
+  "error::pytest.PytestUnraisableExceptionWarning",
+]
+
+# --- pylint -----------------------------------------------------------------
+# Docstrings follow the Google style (Args/Returns/Yields/Raises) and are
+# enforced by the docparams extension.
 [tool.pylint.main]
-py-version = "3.11"
-jobs = 1
+load-plugins = ["pylint.extensions.docparams", "pylint.extensions.docstyle"]
+py-version = "3.12"
 
 [tool.pylint.format]
 max-line-length = 100
 
+[tool.pylint.parameter_documentation]
+default-docstring-type = "google"
+accept-no-param-doc = false
+accept-no-raise-doc = false
+accept-no-return-doc = false
+accept-no-yields-doc = false
+
 [tool.pylint.design]
-# One file of ~3900 lines by design (single-file tool, no package). Command functions
-# orchestrate many steps; the limits are raised instead of splitting them artificially.
+# The capture and restore paths walk /proc, the window list and the snapshot in one
+# function each; splitting them only to meet a count would scatter one algorithm.
 max-args = 10
 max-positional-arguments = 10
+max-attributes = 12
 max-locals = 40
 max-branches = 40
 max-statements = 130
 max-returns = 10
-max-attributes = 12
+min-public-methods = 1
 
 [tool.pylint."messages control"]
-disable = [
-    "too-many-lines",   # single-file tool by design
-]
+# cli.py keeps the program of the versions up to 1.8.0 in one module (history, docs).
+disable = ["too-many-lines"]
 
+# --- quality gates (tools/check.sh, CI) -------------------------------------
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
+files = ["src"]
+check_untyped_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true
-no_implicit_optional = true
-
-[tool.bandit]
-# B404/B603/B606/B607: session-snap starts the user's own programs on purpose; every call
-# passes an argument list, never a shell (shell=False). Reviewed per call site.
-skips = ["B404", "B603", "B606", "B607"]
+warn_unreachable = true
 
 [tool.coverage.run]
+source = ["session_snap"]
 branch = true
+# tests that start "python -m session_snap" as a process are measured too
+patch = ["subprocess"]
+parallel = true
 
 [tool.coverage.report]
-# Measured for 1.8.0: 64 % (statements and branches, in-process tests). The floor guards
-# against regressions; raise it when tests are added.
-fail_under = 60
+fail_under = 90
+precision = 2
 show_missing = false
+skip_covered = true
+
+[tool.bandit]
+# B404/B603: subprocess with argument lists, never shell=True; the programs started are
+# the user's own desktop programs, recorded from /proc (the purpose of the tool).
+# B606/B607: os.execv in SelfRestart starts the running interpreter with "-m session_snap";
+# programs are started by name through PATH like the desktop does.
+skips = ["B404", "B603", "B606", "B607"]

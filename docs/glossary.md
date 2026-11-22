@@ -94,8 +94,11 @@ The borderless view an image viewer shows after a double-click or F11; only the 
 <a id="gl-gtktheme"></a>**GTK_THEME**  
 Environment variable that forces a GTK theme, e.g. `Adwaita:dark`. → [[gtktheme]](#ref-gtktheme)
 
+<a id="gl-devconventions"></a>**dev-conventions**  
+The engineering conventions of the author's own command-line tools (handover v6): XDG layout, git-flow with `main`/`develop`, `tools/release.sh`, seven quality gates, `install.sh` from release tags, `<tool> update`, live update of long-running processes. → [installing](user.md#sec-install)
+
 <a id="gl-idempotent"></a>**Idempotent**  
-An operation with the same effect however often it runs; here: `--install` and the `PATH` block never create duplicates. → [PATH block](user.md#sec-pathblock)
+An operation with the same effect however often it runs; here: the one-time move of the old layout and `install.sh` never create duplicates. → [moving](user.md#sec-migration)
 
 <a id="gl-inotify"></a>**inotify**  
 Linux interface for watching files and folders for changes; the watched objects of a process are listed in `/proc/<pid>/fdinfo`. → [[inotify7]](#ref-inotify7), [[procfdinfo]](#ref-procfdinfo)
@@ -188,7 +191,7 @@ Signal 15; polite request to terminate, which a program may handle or ignore. �
 A program that runs only once per user: a second start passes its file to the running process, which opens another window (e.g. the GNOME image viewer). → [single-instance viewers](user.md#sec-single)
 
 <a id="gl-snapshot"></a>**Snapshot**  
-One record of the desktop state: a JSON file `session-snap_<date>_<time>.json` in `~/scripts/session-snap.d/snapshots/`. → [storage](developer.md#sec-storage)
+One record of the desktop state: a JSON file `session-snap_<date>_<time>.json` in `~/.local/state/session-snap/snapshots/`. → [storage](developer.md#sec-storage)
 
 <a id="gl-staticversion"></a>**Static version reading**  
 Reading the `VERSION = "…"` line from a program's source text instead of running the program. → [update](user.md#sec-update)

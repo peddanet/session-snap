@@ -4,8 +4,8 @@ Record the open videos, images, browsers and other desktop programs of a session
 after a cold boot, and terminate them on request — a lightweight replacement for hibernation on
 **Pop!_OS 24.04 with the COSMIC desktop (Wayland)**.
 
-session-snap is **one executable Python 3 file** for the normal desktop user, standard library
-only. Its user interface is German; the documentation is English.
+session-snap runs as the normal desktop user and uses the Python standard library only. Its
+user interface is German; the documentation is English.
 
 ## Features
 
@@ -20,41 +20,35 @@ only. Its user interface is German; the documentation is English.
 - **All images of single-instance viewers** (eog) are recovered from the window titles.
 - **Alt-Tab order**: a small background process records window activations; a restore rebuilds
   the order.
-- **Terminate** the recorded programs — never the terminal it runs in — with automatic SIGKILL
-  only for players and viewers that ignore SIGTERM.
-- Restored programs follow the **current light/dark theme**; a busy notice above all windows
-  offers a cancel button.
-- **Self-install and update** from the download folder, including the documentation of the same
-  version.
+- **Terminate** the recorded programs — never the terminal it runs in — after comparing the
+  selection with what is open now; windows that would close as a side effect are shown first.
+- **Update and live update**: `session-snap update` installs a newer release; the running
+  background process switches to it without a restart (`session-snap reload`).
 
 ## Requirements
 
 | Item | Requirement |
 |------|-------------|
 | Desktop | Pop!_OS 24.04 LTS with COSMIC (Wayland). Without COSMIC, window functions are skipped. |
-| Python | Python 3 of the system; tested with 3.11, 3.12 and 3.13. No third-party packages. |
+| Python | Python 3.12 or newer with the `venv` module (`sudo apt install python3-venv`). |
+| Tools | `git` (for `install.sh` and `update`). |
 | User | Runs as the normal desktop user; refuses to run as root. |
 
 ## Installation
 
-Download `session-snap` and `test_session_snap` from the
-[latest release](https://github.com/peddanet/session-snap/releases/latest), then install as
-the normal user (the downloaded file is not executable yet, hence `python3`):
-
-~~~bash
-python3 ~/Downloads/session-snap --install
-~~~
-
-Or from a clone of this repository:
+As the normal user (nothing outside your home directory is changed):
 
 ~~~bash
 git clone https://github.com/peddanet/session-snap.git ~/Projects/session-snap
-python3 ~/Projects/session-snap/session-snap --install
+cd ~/Projects/session-snap && ./install.sh && ~/.local/bin/session-snap --version
 ~~~
 
-`--install` copies the program into `~/scripts/` (a copy, not a link), puts `~/scripts` into
-`PATH`, and keeps all data in `~/scripts/session-snap.d/`. Details:
-[installation](docs/user.md#sec-installation).
+`install.sh` installs the newest release tag into `~/.local/share/session-snap/venv` and links
+the command `~/.local/bin/session-snap` (Ubuntu adds `~/.local/bin` to `PATH` at the next
+login). Configuration lives in `~/.config/session-snap/`, snapshots and logs in
+`~/.local/state/session-snap/`. Coming from 1.8.0 or older (`~/scripts/session-snap`): the old
+files move automatically on the first start — see
+[moving from the old layout](docs/user.md#sec-migration).
 
 ## Usage
 
@@ -63,45 +57,42 @@ session-snap                      # interactive main menu
 session-snap save -l "Evening"    # record the session with a label
 session-snap restore -s latest    # restore the newest snapshot
 session-snap kill -s latest       # terminate the recorded programs
+session-snap update               # install a newer release
 session-snap --help
 ~~~
 
 A safe way to try it: [`examples/`](examples/) contains a demo snapshot and a script that
-generates Lorem-ipsum images and short test videos for it.
+generates Lorem-ipsum images and short test videos for it in a temporary folder:
 
 ~~~bash
-python3 examples/make_demo_media.py ~/session-snap-demo
-session-snap show ~/session-snap-demo/demo-snapshot.json
-session-snap restore -s ~/session-snap-demo/demo-snapshot.json --dry-run
+demo=$(mktemp -d) && python3 examples/make_demo_media.py "$demo"
+session-snap show "$demo/demo-snapshot.json"
 ~~~
 
-In 1.8.0, a snapshot given as a path is accepted only if at least one snapshot of your own exists
-(`session-snap save` once); `--dry-run` starts nothing.
+A snapshot given as a path is accepted once at least one snapshot of your own exists
+(`session-snap save` once).
 
 ## Documentation
 
 | Document | Content |
 |----------|---------|
-| [docs/user.md](docs/user.md) | User guide: installation, commands, interface, configuration, 20 use cases, troubleshooting |
+| [docs/user.md](docs/user.md) | User guide: installation, commands, interface, configuration, use cases, troubleshooting |
 | [docs/developer.md](docs/developer.md) | Developer guide: platform analysis, architecture, data model, algorithms, verification |
 | [docs/glossary.md](docs/glossary.md) | Every technical term with a link for further reading |
 | [CHANGELOG.md](CHANGELOG.md) | Version history |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Branches, commits, quality gates |
-
-The complete documentation and the *Code Primer* (PDF and Markdown, with rendered diagrams,
-index and source listing) are attached to every
-[release](https://github.com/peddanet/session-snap/releases).
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Branches, quality gates, release procedure |
 
 ## Development
 
-The code must pass six quality gates — privacy, format, pylint 10.00/10, mypy, bandit, tests
-with branch coverage — locally and on GitHub Actions:
+The code must pass seven quality gates — privacy, shell, format, lint (pylint 10.00/10 with
+Google-style docstrings), types, security, tests with at least 90 % branch coverage — locally,
+in the pre-push hook and on GitHub Actions (Python 3.12 and 3.14):
 
 ~~~bash
 tools/check.sh
 ~~~
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the set-up of the check tools and the pre-push hook.
+Set-up and release procedure: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Licence
 
