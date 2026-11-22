@@ -8,6 +8,11 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+### Fixed
+
+- install.sh stopped when it moved the test file of 1.8.0: the comment behind its
+  VERSION line became part of the backup name. Only the version number is taken now.
+
 ## [2.0.0] - 2026-11-22
 
 ### Added
