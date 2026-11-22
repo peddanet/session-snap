@@ -38,6 +38,9 @@ were delivered as single files and imported into the repository afterwards (see
 - Under heavy load the window list of the compositor timed out after 2 s and image viewers
   with one process for all windows looked as if they showed only their first image; the list
   is retried with 6 s, an incomplete capture is announced, and saving asks before writing it.
+- The tests no longer depend on the running desktop session: without isolation they saw the
+  real Wayland compositor, the real cosmic-panel and a running Chrome and failed on a
+  desktop (restore checklist, app window relaunch, appearance variables).
 
 ## [1.8.0] - 2026-11-13
 

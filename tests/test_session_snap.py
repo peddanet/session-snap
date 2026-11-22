@@ -43,6 +43,7 @@ SRC = HERE.parent / "src"
 IS_ROOT = os.geteuid() == 0
 os.environ.setdefault("SESSION_SNAP_DIR", tempfile.mkdtemp(prefix="ssnap-import-"))
 ss = importlib.import_module("session_snap.cli")
+SCAN_PROCESSES = ss.scan_processes   # the real scan, before any test replaces it
 # command line of the program for tests that start it as a process
 PROG = [sys.executable, "-m", "session_snap"]
 os.environ["PYTHONPATH"] = str(SRC) + (os.pathsep + os.environ["PYTHONPATH"]
@@ -124,7 +125,13 @@ class Base(unittest.TestCase):
         os.environ.update({"XDG_DATA_HOME": str(cls.tmp / "data"),
                            "XDG_DATA_DIRS": str(cls.tmp / "sys"),
                            "SESSION_SNAP_DIR": str(cls.store)})
-        os.environ.setdefault("WAYLAND_DISPLAY", "wayland-test")
+        # isolated from a running desktop session: no Wayland socket (window list unknown,
+        # as over SSH) and no real session process as reference for the appearance
+        (cls.tmp / "run").mkdir(mode=0o700)
+        os.environ.update({"WAYLAND_DISPLAY": "wayland-test",
+                           "XDG_RUNTIME_DIR": str(cls.tmp / "run")})
+        cls._session_refs = ss.SESSION_REFS
+        ss.SESSION_REFS = ("ssnap-panel",)
         ss.init_paths()
         ss.setup_logging()
         cls.cfg = ss.load_config()
@@ -137,6 +144,7 @@ class Base(unittest.TestCase):
             h.close()
         os.environ.clear()
         os.environ.update(cls._env_backup)
+        ss.SESSION_REFS = cls._session_refs
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def setUp(self):
@@ -205,6 +213,16 @@ class Base(unittest.TestCase):
             list: The entries of this test's dummies.
         """
         return [e for e in entries if e["cmd"][0].startswith(str(self.bin) + "/")]
+
+    def only_dummies(self):
+        """Running processes, restricted to the dummies of this test (stand-in for
+        ss.scan_processes, so that real programs of the desktop are not seen).
+
+        Returns:
+            dict: {pid: Proc} of the dummies.
+        """
+        mine = set(self._dummy_pids())
+        return {pid: p for pid, p in SCAN_PROCESSES().items() if pid in mine}
 
     def entries(self):
         """Current capture, filtered to the dummies of this test.
@@ -871,7 +889,9 @@ class T6_Browser_Programs(Base):
         self.spawn("chrome", ONE, "--profile-directory=Default")
         self.wait_for(lambda: len(self.entries()) == 1, msg="chrome")
         wins = [("chrome-abc123-Default", "Claude"), ("google-chrome", "Neuer Tab")]
-        with mock.patch.object(ss, "list_windows", return_value=wins):
+        # only the dummies: a real Chrome of the desktop would otherwise host the app window
+        with mock.patch.object(ss, "list_windows", return_value=wins), \
+                mock.patch.object(ss, "scan_processes", self.only_dummies):
             es = self.entries()
             self.assertEqual(sorted(e["program"] for e in es), ["Claude", "chrome"])
             app = next(e for e in es if e.get("app"))
@@ -1631,16 +1651,16 @@ class T9_Single_Instance(Base):
     def test_50_system_theme_wins(self):
         """restore follows the CURRENT desktop session (system theme), not the recorded
         environment: a viewer saved in light mode comes back dark when the desktop is dark"""
-        shutil.copy2(os.path.realpath(sys.executable), self.bin / "cosmic-panel")
+        shutil.copy2(os.path.realpath(sys.executable), self.bin / "ssnap-panel")
         env = dict(os.environ, GTK_THEME="Adwaita:dark", COLOR_SCHEME_TEST="1")
         panel = subprocess.Popen(  # pylint: disable=consider-using-with
-            [str(self.bin / "cosmic-panel"), "-c", SLEEP], env=env,
+            [str(self.bin / "ssnap-panel"), "-c", SLEEP], env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True)
         self.children.append(panel)
         self.wait_for(lambda: ss.session_look_env() is not None, msg="session process")
         name, pid, look = ss.session_look_env()
-        self.assertEqual((name, pid, look["GTK_THEME"]), ("cosmic-panel", panel.pid,
+        self.assertEqual((name, pid, look["GTK_THEME"]), ("ssnap-panel", panel.pid,
                                                           "Adwaita:dark"))
         e = {"category": "image", "program": "eog", "files": [str(self.png)], "cwd": "",
              "cmd": [str(self.bin / "eog"), "-c", SLEEP, str(self.png)],
@@ -1648,12 +1668,12 @@ class T9_Single_Instance(Base):
         ss.save_snapshot([e], "hell")
         with mock.patch.dict(os.environ, {"GTK_THEME": "Adwaita"}):
             _rc, out = self.run_main("restore", "-s", "latest", "--all", "--no-maximize")
-        self.assertIn("wie die Desktop-Sitzung: cosmic-panel", out)
+        self.assertIn("wie die Desktop-Sitzung: ssnap-panel", out)
         self.wait_for(lambda: [p for p in self._dummy_pids() if p != panel.pid], msg="eog")
         new = [p for p in self._dummy_pids() if p != panel.pid][0]
         self.assertEqual(ss._read_environ(new).get("GTK_THEME"), "Adwaita:dark")
         _rc, out = self.run_main("diagnose")
-        self.assertIn("Desktop-Sitzung (Vorlage fuer Darstellung): cosmic-panel", out)
+        self.assertIn("Desktop-Sitzung (Vorlage fuer Darstellung): ssnap-panel", out)
 
     def test_45_vlc_default_options(self):
         """VLC gets its own window per file (--no-one-instance-when-started-from-file) and
