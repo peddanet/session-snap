@@ -8,6 +8,8 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-11-22
+
 ### Fixed
 
 - install.sh stopped when it moved the test file of 1.8.0: the comment behind its
