@@ -8,6 +8,8 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-22
+
 ### Added
 
 - `install.sh`: installs a release tag into `~/.local/share/session-snap/venv` and links
