@@ -106,6 +106,9 @@ Linux interface for watching files and folders for changes; the watched objects 
 <a id="gl-label"></a>**Label**  
 Free-text name of a snapshot (`-l`), stored inside the JSON file; it does not change the file name. → [label](user.md#sec-label)
 
+<a id="gl-layershell"></a>**Layer shell**  
+Wayland protocol (`wlr-layer-shell`) for surfaces that are not ordinary windows: panels, launchers, lock screens, overlays. A layer surface sits on one of four layers, from `background` up to `overlay`, and can ask for the keyboard *exclusively*, then no window gets key presses. Used by session-snap for the busy overlay. → [[layershell]](user.md#ref-layershell), [[cosmicfocus]](user.md#ref-cosmicfocus)
+
 <a id="gl-localstate"></a>**Local State (Chrome)**  
 JSON file in Chrome's user data directory with browser-wide settings, among them the profiles that are open (`profile.last_active_profiles`) and their display names. → [[chromeprefs]](#ref-chromeprefs)
 

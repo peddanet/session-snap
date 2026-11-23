@@ -293,7 +293,7 @@ def load_config() -> dict:
         "image_viewers": set(IMAGE_VIEWERS), "video_players": set(VIDEO_PLAYERS),
         "delay": 0.4, "kill_timeout": 5.0, "maximize_timeout": 20.0, "order": "saved",
         "maximize": parse_maximize(DEFAULT_MAXIMIZE),
-        "fullscreen": parse_maximize(DEFAULT_FULLSCREEN), "overlay": True,
+        "fullscreen": parse_maximize(DEFAULT_FULLSCREEN), "overlay": "fullscreen",
         "browser_session": True,
         "player_options": {k: list(v) for k, v in DEFAULT_PLAYER_OPTIONS.items()}}
     if not CONFIG_FILE.is_file():
@@ -339,8 +339,7 @@ def load_config() -> dict:
             cfg["browser_session"] = s.get("browser_session", "").strip().lower() not in (
                 "no", "nein", "0", "false", "off")
         if "overlay" in s:
-            cfg["overlay"] = s.get("overlay", "").strip().lower() not in (
-                "no", "nein", "0", "false", "off")
+            cfg["overlay"] = parse_overlay(s.get("overlay", ""))
         if s.get("order", "").strip() in ("saved", "keep"):
             cfg["order"] = s.get("order", "").strip()
         for key in ("delay", "kill_timeout", "maximize_timeout"):
@@ -377,8 +376,10 @@ fullscreen = images
 order = saved
 # Longest wait for the windows to appear (seconds)
 maximize_timeout = 20
-# Notice on top of all windows while session-snap works, with button "Abbrechen": yes / no
-overlay = yes
+# Progress display above all windows while session-snap works (button "Abbrechen",
+# Esc / Ctrl+C): fullscreen = dim layer, blocks keyboard and mouse; corner = box in the upper
+# right corner, blocks the keyboard; notify = desktop notification; off = none (yes = fullscreen)
+overlay = fullscreen
 # Browsers: restore the last session (all profiles, windows, tabs): yes / no
 browser_session = yes
 
@@ -1974,8 +1975,6 @@ def run_launches(entries: list, delay: float, dry_run: bool = False,
     ok = fail = 0
     started_max = []
     restored_browser = False
-    if not dry_run:
-        busy(f"Starte {len(entries)} Programm(e) …")
     for i, e in enumerate(entries, 1):
         what = e["files"][0] if e["files"] else shlex.join(e["cmd"])
         if e.get("via"):
@@ -1985,6 +1984,7 @@ def run_launches(entries: list, delay: float, dry_run: bool = False,
         if dry_run:
             print(f"{_prefix(i, len(entries), e)} DRY-RUN  {shlex.join(e['cmd'])}")
             continue
+        busy(f"Starte {len(entries)} Programm(e) …", i - 1, len(entries))
         if e.get("app") and restored_browser and _app_window_appears(e, 8.0):
             print(f"{_prefix(i, len(entries), e)} OK    {what}  [von der Browser-Sitzung "
                   "bereits geoeffnet]")
@@ -2028,30 +2028,138 @@ def run_launches(entries: list, delay: float, dry_run: bool = False,
 
 
 # =========================================================================== busy overlay
-# While session-snap starts, arranges or ends windows, a desktop notification stays on top
-# of all windows (COSMIC: cosmic-notifications, capabilities "actions" and "persistence";
-# expire_timeout 0 = stays until closed). Its button "Abbrechen" interrupts session-snap
-# exactly like Ctrl+C in the terminal. Talks to org.freedesktop.Notifications with gdbus
-# (GLib, part of every GTK desktop); without gdbus or a session bus nothing is shown.
+# While session-snap starts, arranges or ends windows, a progress display stays above
+# all windows. Its button "Abbrechen" (and Esc / Ctrl+C in the overlay) interrupts
+# session-snap exactly like Ctrl+C in the terminal. Styles (config "overlay"):
+#   fullscreen  dim layer over all outputs, card in the middle, takes keyboard and mouse
+#   corner      box in the upper right corner, takes the keyboard
+#   notify      desktop notification (as up to 2.0)
+#   off         nothing
+# fullscreen/corner run overlay_gtk.py with the system Python (GTK 3 + gtk-layer-shell);
+# if that is not possible the notification is used instead. The notification talks to
+# org.freedesktop.Notifications with gdbus (COSMIC: cosmic-notifications, capabilities
+# "actions" and "persistence"; expire_timeout 0 = stays until closed).
 NOTIFY = ("--dest", "org.freedesktop.Notifications",
           "--object-path", "/org/freedesktop/Notifications")
 NOTIFY_IFACE = "org.freedesktop.Notifications"
+OVERLAY_STYLES = ("fullscreen", "corner", "notify", "off")
+OVERLAY_HELPER = Path(__file__).resolve().with_name("overlay_gtk.py")
+OVERLAY_PYTHON = "/usr/bin/python3"
+OVERLAY_START_TIMEOUT = 5.0
 
 
-class Overlay:
-    """with Overlay("Wiederherstellen") as ov: ov.show("Starte 5 Programme ...")"""
+def parse_overlay(value: str) -> str:
+    """Config value of "overlay" as a style; yes = fullscreen, no = off.
+
+    Args:
+        value: Text from the configuration.
+
+    Returns:
+        str: One of OVERLAY_STYLES.
+    """
+    v = value.strip().lower()
+    if v in OVERLAY_STYLES:
+        return v
+    if v in ("no", "nein", "0", "false"):
+        return "off"
+    return "fullscreen"
+
+
+class Overlay:  # pylint: disable=too-many-instance-attributes
+    """with Overlay("Wiederherstellen", "fullscreen") as ov: ov.show("Starte ...", 3, 50)"""
 
     current: "Overlay | None" = None
 
-    def __init__(self, title: str, enabled: bool = True):
-        self.title, self.id = title, 0
+    def __init__(self, title: str, style: "str | bool" = "fullscreen"):
+        if style is True:
+            style = "fullscreen"
+        elif not style:
+            style = "off"
+        env = os.environ.get("SESSION_SNAP_OVERLAY", "1").strip().lower()
+        if env == "0":
+            style = "off"
+        elif env in OVERLAY_STYLES:
+            style = env
+        self.title, self.id, self.style = title, 0, str(style)
         self.mon: subprocess.Popen | None = None
+        self.helper: subprocess.Popen | None = None
         self.thread: threading.Thread | None = None
         self.cancelled = False
-        self.enabled = bool(enabled and os.environ.get("SESSION_SNAP_OVERLAY", "1") != "0"
-                            and os.environ.get("DBUS_SESSION_BUS_ADDRESS")
-                            and shutil.which("gdbus"))
+        self.notify_ok = bool(os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+                              and shutil.which("gdbus"))
+        if self.style in ("fullscreen", "corner") and not os.environ.get("WAYLAND_DISPLAY"):
+            self.style = "notify"
+        self.enabled = self.style != "off" and (self.style != "notify" or self.notify_ok)
 
+    # ------------------------------------------------------------------ cancel
+    def _cancel(self) -> None:
+        self.cancelled = True
+        log.info("overlay: cancelled by the user")
+        os.kill(os.getpid(), signal.SIGINT)        # -> KeyboardInterrupt
+
+    # ------------------------------------------------------------------ GTK helper
+    def _start_helper(self) -> bool:
+        """Start overlay_gtk.py; True once it reports "ready"."""
+        python = os.environ.get("SESSION_SNAP_OVERLAY_PYTHON", OVERLAY_PYTHON)
+        try:
+            # lives until close(); own session: Ctrl+C in the terminal does not kill it
+            self.helper = subprocess.Popen(  # pylint: disable=consider-using-with
+                [python, "-I", str(OVERLAY_HELPER), self.style], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                start_new_session=True)
+        except OSError as exc:
+            log.info("overlay helper not started: %s", exc)
+            return False
+        assert self.helper.stdout is not None  # nosec B101 - set by PIPE above
+        ready, _w, _x = select.select([self.helper.stdout], [], [], OVERLAY_START_TIMEOUT)
+        first = self.helper.stdout.readline().strip() if ready else "no answer"
+        if first != "ready":
+            log.info("overlay helper unavailable: %s", first or "ended")
+            self._stop_helper()
+            return False
+        self.thread = threading.Thread(target=self._watch_helper, daemon=True)
+        self.thread.start()
+        log.info("overlay: %s (%s)", self.style, python)
+        return True
+
+    def _watch_helper(self) -> None:
+        helper = self.helper
+        if helper is None or helper.stdout is None:
+            return
+        for line in helper.stdout:
+            if line.strip() == "cancel":
+                self._cancel()
+                return
+
+    def _send(self, msg: dict) -> bool:
+        if self.helper is None or self.helper.stdin is None:
+            return False
+        try:
+            self.helper.stdin.write(json.dumps(msg) + "\n")
+            self.helper.stdin.flush()
+            return True
+        except (OSError, ValueError) as exc:
+            log.info("overlay helper gone: %s", exc)
+            self._stop_helper()
+            return False
+
+    def _stop_helper(self) -> None:
+        helper, self.helper = self.helper, None
+        if helper is None:
+            return
+        for stream in (helper.stdin, helper.stdout):
+            try:
+                if stream is not None:
+                    stream.close()
+            except OSError:
+                pass
+        try:
+            helper.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            helper.kill()
+            helper.wait()
+
+    # ------------------------------------------------------------------ notification
     def _call(self, method: str, *args) -> str:
         r = subprocess.run(["gdbus", "call", "--session", *NOTIFY, "--method",
                             f"{NOTIFY_IFACE}.{method}", *args],
@@ -2067,18 +2175,12 @@ class Overlay:
         for line in self.mon.stdout:
             if ("ActionInvoked" in line and f"(uint32 {self.id}," in line
                     and "'cancel'" in line):
-                self.cancelled = True
-                log.info("overlay: cancelled by the user")
-                os.kill(os.getpid(), signal.SIGINT)        # -> KeyboardInterrupt
+                self._cancel()
                 return
 
-    def show(self, text: str) -> None:
-        """Show or update the notice (silently disabled on any error).
-
-        Args:
-            text: Text of the notice.
-        """
-        if not self.enabled:
+    def _notify(self, text: str, done: int, total: int) -> None:
+        if not self.notify_ok:
+            self.enabled = False
             return
         try:
             if self.mon is None:
@@ -2088,9 +2190,10 @@ class Overlay:
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
                 self.thread = threading.Thread(target=self._watch, daemon=True)
                 self.thread.start()
+            step = f" ({done} / {total})" if total > 0 else ""
             out = self._call("Notify", "session-snap", str(self.id), "system-run",
                              f"session-snap arbeitet: {self.title}",
-                             f"{text}\nBitte nicht eingreifen.",
+                             f"{text}{step}\nBitte nicht eingreifen.",
                              '["cancel", "Abbrechen"]',
                              '{"urgency": <byte 2>, "resident": <true>}', "0")
             m = re.search(r"uint32 (\d+)", out)
@@ -2101,8 +2204,39 @@ class Overlay:
             self.close()
             self.enabled = False
 
+    # ------------------------------------------------------------------ public
+    def show(self, text: str, done: int = 0, total: int = 0) -> None:
+        """Show or update the display (silently disabled on any error).
+
+        Args:
+            text: Description of the current step.
+            done: Finished units of the step (with total: progress bar).
+            total: Units of the step; 0 = no progress bar.
+        """
+        if not self.enabled:
+            return
+        if self.style in ("fullscreen", "corner"):
+            if self.helper is None and not self._start_helper():
+                self.style = "notify"                    # fall back to the notification
+            elif self._send({"title": self.title, "text": text, "done": done,
+                             "total": total}):
+                return
+            else:
+                self.style = "notify"
+        self._notify(text, done, total)
+
+    def keyboard(self, on: bool) -> None:
+        """Take (True) or release (False) the keyboard; only for the GTK overlay.
+
+        Args:
+            on: Whether the overlay holds the keyboard.
+        """
+        if self.helper is not None:
+            self._send({"keyboard": bool(on)})
+
     def close(self) -> None:
-        """Remove the notice and stop listening for the button."""
+        """Remove the display and stop listening for the button."""
+        self._stop_helper()
         if self.id:
             try:
                 self._call("CloseNotification", str(self.id))
@@ -2130,15 +2264,28 @@ class Overlay:
         return False
 
 
-def busy(text: str) -> None:
+def busy(text: str, done: int = 0, total: int = 0) -> None:
     """Update the busy overlay (if one is open) and print the step in the terminal.
 
     Args:
         text: Description of the current step.
+        done: Finished units (shown as progress bar with total).
+        total: Units of the step; 0 = no progress bar.
     """
-    print(f"… {text}", flush=True)
+    if total <= 0 or done == 0:
+        print(f"… {text}", flush=True)
     if Overlay.current is not None:
-        Overlay.current.show(text)
+        Overlay.current.show(text, done, total)
+
+
+def overlay_keyboard(on: bool) -> None:
+    """Let the open overlay take or release the keyboard.
+
+    Args:
+        on: Whether the overlay holds the keyboard.
+    """
+    if Overlay.current is not None:
+        Overlay.current.keyboard(on)
 
 
 # =========================================================================== terminating
@@ -2280,8 +2427,7 @@ def terminate(targets: list, timeout: float, force: bool, dry_run: bool = False,
             for name, cmd in t.get("relaunch", []) if relaunch else []:
                 print(f"            DRY-RUN  danach neu starten: {name}: {shlex.join(cmd)}")
             continue
-        if i == 1:
-            busy(f"Beende {n} Programm(e) …")
+        busy(f"Beende {n} Programm(e) …", i - 1, n)
         res = _signal(t, signal.SIGTERM)
         print(f"{_prefix(i, n, t)} SIGTERM  {what}: {res}")
         log.info("kill SIGTERM pid=%d %s: %s", t["pid"], t["program"], res)
@@ -2289,11 +2435,16 @@ def terminate(targets: list, timeout: float, force: bool, dry_run: bool = False,
         return 0
     deadline = time.monotonic() + timeout
     alive = [t for t in targets if is_alive(t["pid"], t["start"])]
+    waiting = len(alive)
     if alive:
-        busy(f"Warte bis zu {timeout:.0f} s auf {len(alive)} Programm(e) …")
+        busy(f"Warte bis zu {timeout:.0f} s auf {waiting} Programm(e) …", 0, waiting)
     while alive and time.monotonic() < deadline:
         time.sleep(0.1)
+        before = len(alive)
         alive = [t for t in alive if is_alive(t["pid"], t["start"])]
+        if len(alive) != before:
+            busy(f"Warte bis zu {timeout:.0f} s auf {waiting} Programm(e) …",
+                 waiting - len(alive), waiting)
     auto = [] if force else [t for t in alive if force_safe(t)]
     for t in auto:
         res = _signal(t, signal.SIGKILL)
@@ -3223,6 +3374,82 @@ def install_watcher(start: bool = True) -> list:
     return out
 
 
+# =========================================================================== menu entry
+# Entry in the application menu (COSMIC app library / launcher): opens the interactive menu
+# of session-snap in a terminal. The terminal is chosen when the entry is written:
+# cosmic-term ("-e PROGRAM ARGS", src/main.rs of pop-os/cosmic-term), else the Debian
+# alternative x-terminal-emulator ("-e"), else Terminal=true for the desktop to decide.
+ICON_SVG = """\
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="#2b6cb0"/>
+  <rect x="20" y="30" width="62" height="46" rx="6" fill="none" stroke="#e8f0fa"
+        stroke-width="6" opacity="0.55"/>
+  <rect x="38" y="46" width="70" height="52" rx="7" fill="#e8f0fa"/>
+  <rect x="38" y="46" width="70" height="12" rx="6" fill="#f6ad55"/>
+  <circle cx="73" cy="78" r="13" fill="none" stroke="#2b6cb0" stroke-width="6"/>
+  <circle cx="73" cy="78" r="4" fill="#2b6cb0"/>
+</svg>
+"""
+
+
+def desktop_entry_paths() -> tuple[Path, Path]:
+    """Menu entry and icon of session-snap.
+
+    Returns:
+        (desktop file, SVG icon) below XDG_DATA_HOME.
+    """
+    data = xdg_dir("XDG_DATA_HOME", ".local/share")
+    return (data / "applications" / "session-snap.desktop",
+            data / "icons" / "hicolor" / "scalable" / "apps" / "session-snap.svg")
+
+
+def desktop_entry_text() -> str:
+    """Text of the menu entry for the installed program (PROGRAM).
+
+    Returns:
+        Content of the .desktop file.
+    """
+    term, use_terminal = "", "false"
+    if shutil.which("cosmic-term"):
+        term = "cosmic-term -e "
+    elif shutil.which("x-terminal-emulator"):
+        term = "x-terminal-emulator -e "
+    else:
+        use_terminal = "true"
+    return ("[Desktop Entry]\nType=Application\nName=session-snap\n"
+            "Comment=Sitzung speichern, wiederherstellen und beenden\n"
+            f"Exec={term}{PROGRAM}\nIcon=session-snap\nTerminal={use_terminal}\n"
+            "Categories=Utility;\nKeywords=session;snapshot;restore;Sitzung;\n")
+
+
+def cmd_desktop_entry(remove: bool = False) -> int:
+    """Write (or remove) the menu entry and the icon; unchanged files stay as they are.
+
+    Args:
+        remove: Remove both files instead.
+
+    Returns:
+        0.
+    """
+    entry, icon = desktop_entry_paths()
+    for f, text in ((entry, desktop_entry_text()), (icon, ICON_SVG)):
+        if remove:
+            if f.exists():
+                f.unlink()
+                print(f"{f}: entfernt")
+            continue
+        if f.exists() and f.read_text(encoding="utf-8") == text:
+            print(f"{f}: vorhanden - unveraendert")
+            continue
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text, encoding="utf-8")
+        print(f"{f}: angelegt")
+    if not remove:
+        print("Im Anwendungsmenue erscheint jetzt \"session-snap\" (ggf. nach einigen "
+              "Sekunden).")
+    return 0
+
+
 def stop_watcher(timeout: float = 3.0) -> bool:
     """End the background process; True if it ran and has ended.
 
@@ -3407,7 +3634,7 @@ def reorder_windows(entries: list, timeout: float = 20.0, settle: float = 6.0,
         if CAP_ACTIVATE not in wl.caps:
             raise WaylandError("Compositor erlaubt kein Aktivieren (Capability fehlt)")
         start = last = time.monotonic()
-        found, seen = {}, 0
+        found, seen, shown = {}, 0, -1
         while True:
             live = [(h, v) for h, v in wl.handles.items() if not v["closed"] and v["done"]]
             wins = [(v["app_id"], v["title"]) for _h, v in live]
@@ -3415,17 +3642,32 @@ def reorder_windows(entries: list, timeout: float = 20.0, settle: float = 6.0,
             found = {i: live[j][0] for i, j in m.items()}
             if len(live) != seen:
                 seen, last = len(live), time.monotonic()
+            if len(found) != shown:
+                shown = len(found)
+                busy(f"Alt-Tab-Reihenfolge: warte auf Fenster ({shown} von {len(want)} "
+                     "gefunden)", shown, len(want))
             now = time.monotonic()
             if len(found) == len(want) or now - start > timeout or now - last > settle:
                 break
             wl.wait(0.3)
-        done = []
-        for i in sorted(found, key=lambda k: want[k]["order"]):
-            h = found[i]
-            wl.send(manager, 2, ("u", h), ("u", seat))          # activate(toplevel, seat)
-            wl.roundtrip()
-            time.sleep(pause)
-            done.append((wl.handles[h]["app_id"], wl.handles[h]["title"]))
+        waited = time.monotonic() - start
+        done: list = []
+        # the overlay must not hold the keyboard while windows are activated, or the
+        # compositor may keep the focus on the overlay and the order does not change
+        overlay_keyboard(False)
+        try:
+            for i in sorted(found, key=lambda k: want[k]["order"]):
+                h = found[i]
+                busy("Alt-Tab-Reihenfolge: Fenster ordnen", len(done), len(found))
+                wl.send(manager, 2, ("u", h), ("u", seat))      # activate(toplevel, seat)
+                wl.roundtrip()
+                time.sleep(pause)
+                done.append((wl.handles[h]["app_id"], wl.handles[h]["title"]))
+        finally:
+            overlay_keyboard(True)
+        log.info("reorder timing: waited %.1f s for %d of %d windows, activated %d in "
+                 "%.1f s", waited, len(found), len(want), len(done),
+                 time.monotonic() - start - waited)
         return done
     finally:
         wl.close()
@@ -4958,6 +5200,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="an apply-release.sh weitergereicht, z. B. --list oder -y")
     sub.add_parser("reload", help="laufenden Mitschreiber (watch) auf die installierte "
                                   "Version umschalten")
+    de = sub.add_parser("desktop-entry",
+                        help="Eintrag mit Symbol im Anwendungsmenue anlegen (oeffnet das Menue "
+                             "im Terminal)")
+    de.add_argument("--remove", action="store_true", help="Eintrag und Symbol entfernen")
     return ap
 
 
@@ -5004,6 +5250,8 @@ def main(argv: list | None = None) -> int:  # pylint: disable=too-many-return-st
         return ReleaseUpdater(extra).run()
     if a.cmd == "reload":
         return cmd_reload()
+    if a.cmd == "desktop-entry":
+        return cmd_desktop_entry(a.remove)
     cfg = load_config()
     try:
         if a.cmd == "save":

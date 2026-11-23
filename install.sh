@@ -140,3 +140,5 @@ elif [ -n "$resolved" ] && [ "$resolved" != "$LINK" ]; then
 fi
 # first start of the new release: moves the data of the old layout, restarts the watcher
 "$LINK" watch --status || echo "NOTE: '$LINK watch --status' failed - see above"
+# entry with icon in the application menu (written by the program, unchanged files stay)
+"$LINK" desktop-entry || echo "NOTE: '$LINK desktop-entry' failed - see above"

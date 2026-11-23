@@ -100,3 +100,4 @@ def test_old_files_move_with_their_version(home: dict[str, str]) -> None:
     entry = (h / ".config" / "autostart" / "session-snap-watch.desktop").read_text()
     assert f"Exec={h}/.local/bin/session-snap watch" in entry
     assert "called: watch --status" in run.stdout
+    assert "called: desktop-entry" in run.stdout

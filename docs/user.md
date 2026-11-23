@@ -40,6 +40,8 @@ Table: Changes from version 1.7.0 to 2.0.0.
 | 1.8.0 | Repository | Public repository `peddanet/session-snap` with the history of all available versions as tagged commits, branches `main` and `develop`, user and developer guide in `docs/`, `CHANGELOG.md`, `CONTRIBUTING.md`, demo snapshot with generated Lorem-ipsum media in `examples/` ([release procedure](developer.md#sec-release)). |
 | 1.8.0 | Quality | Six [quality gates](developer.md#sec-gates): privacy, format (≤ 100 characters), pylint 10.00/10, mypy, bandit, tests with branch coverage; English docstrings for every function and class; internal renames without behaviour change (`interactive()` → `interactive_menu()`, `_Wl._send()` → `_Wl.send()`). 67 tests. |
 | 2.0.0 | Conventions | Built and released by the dev-conventions v6: package `session_snap`, `install.sh` from release tags into `~/.local/share/session-snap/venv`, command `~/.local/bin/session-snap`, XDG layout with a one-time move of `~/scripts/session-snap.d` ([moving](#sec-migration)), `session-snap update` and `reload` ([update](#sec-update)), `tools/release.sh`, seven [quality gates](developer.md#sec-gates). `--install` and `--update` from the download folder are gone, hence a major version. |
+| next | Overlay | Progress card above all windows with spinner, progress bar "n / m" and time left; blocks keyboard (and in style `fullscreen` the mouse) except Esc / Ctrl+C / *Abbrechen*; styles `fullscreen`, `corner`, `notify`, `off` ([busy overlay](#sec-overlay)). |
+| next | Menu entry | `session-snap desktop-entry` (run by `install.sh`): entry with icon in the application menu, opens the menu in a terminal ([menu entry](#sec-menuentry)). |
 | 2.0.0 | Terminate | Kill compares the selection with what is open now, offers to save a new snapshot first, lists windows that close as a side effect and keeps browsers unless confirmed; the window list is retried under load and an incomplete capture is announced ([UC6](#uc6)). |
 
 
@@ -118,7 +120,7 @@ Table: Requirements and their verification. Test IDs refer to the [test catalogu
 | R35 | Restore and terminate offer a tree selection: everything, per category, per program, with arrow keys and space bar and a key legend. | T18, T56 |
 | R36 | The restore menu shows how many entries of each category are already running. | T57 |
 | R37 | Snapshots can be renamed, archived and deleted. | T63 |
-| R38 | While session-snap works, a notice above all windows says so and offers to cancel. | T59 |
+| R38 | While session-snap works, a display above all windows shows the step and its progress, blocks other input and offers to cancel (button, Esc, Ctrl+C). | T59, T59b |
 | R39 | Players and image viewers are terminated without a question; programs with possibly unsaved data are asked about. | T21 |
 | R40 | Chrome app windows (Claude) are terminated with their browser and started again, however Chrome was started. | T30, T60, T64 |
 | R41 | Browsers restore their last session: Chrome with all last profiles, Firefox per profile, with windows and tabs. | T65, T66 |
@@ -126,6 +128,7 @@ Table: Requirements and their verification. Test IDs refer to the [test catalogu
 | R43 | Installation and update copy the documentation that belongs to the installed version, or say that it is missing. | T67 |
 | R44 | The public repository contains no personal data: example data are invented placeholders (Lorem ipsum). | privacy gate, [quality gates](developer.md#sec-gates) |
 | R45 | Every push passes the quality gates locally (pre-push hook) and on GitHub Actions with Python 3.12. | [quality gates](developer.md#sec-gates) |
+| R46 | session-snap can be started from the application menu (entry with icon). | T59c |
 
 ## Deliverables
 
@@ -203,7 +206,8 @@ Table: Privilege level of every command in this document.
 
 | Command | Runs as | Justification |
 |---------|---------|---------------|
-| `./install.sh`, `./install.sh v2.0.0` | normal user | writes only `~/.local/share/session-snap/venv`, `~/.local/bin/session-snap`, `~/.local/state/session-snap/backup`, `~/.config/autostart` |
+| `./install.sh`, `./install.sh v2.0.0` | normal user | writes only `~/.local/share/session-snap/venv`, `~/.local/bin/session-snap`, `~/.local/state/session-snap/backup`, `~/.config/autostart`, the menu entry and icon below `~/.local/share` |
+| `sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-gtklayershell-0.1 python3-gi-cairo` | `sudo` | apt writes below `/usr`; needed once for the progress overlay ([overlay](#sec-overlay)) |
 | `session-snap …` (all subcommands, also `watch`, `update`, `reload`) | normal user | reads only own processes; starts and terminates only own programs; writes only its XDG folders |
 | `tools/check.sh`, `python3 -m pytest` | normal user | the tests start and terminate only their own dummy processes in temporary folders |
 | `apt-cache policy …`, `grep`, `ps`, `sha256sum`, `hash -r` | normal user | read-only queries, or affect only the current shell |
@@ -256,7 +260,7 @@ cd ~/Projects/session-snap && ./install.sh && ~/.local/bin/session-snap --versio
 ```
 
 * `git clone` puts the repository into `~/Projects/session-snap`.
-* `./install.sh` reads the release tags with `git ls-remote`, creates `~/.local/share/session-snap/venv` and installs the newest release there with pip (`./install.sh v2.0.0` installs a given one, `./install.sh --list` lists them). It checks that the program reports the version of the tag, links `~/.local/bin/session-snap` and finally runs `session-snap watch --status`, which performs the one-time move of older data and restarts the background process.
+* `./install.sh` reads the release tags with `git ls-remote`, creates `~/.local/share/session-snap/venv` and installs the newest release there with pip (`./install.sh v2.0.0` installs a given one, `./install.sh --list` lists them). It checks that the program reports the version of the tag, links `~/.local/bin/session-snap`, runs `session-snap watch --status`, which performs the one-time move of older data and restarts the background process, and finally `session-snap desktop-entry` for the entry in the application menu ([menu entry](#sec-menuentry)).
 * `~/.local/bin/session-snap --version` with the full path shows the installed release even if an active development venv would shadow the command.
 
 Ubuntu puts `~/.local/bin` into `PATH` at login if the folder exists then; after its first creation, log out and in once. Until then the full path works.
@@ -342,6 +346,7 @@ Table: Subcommands. Dash aliases are accepted as the first argument: `--save`, `
 | `session-snap config` | create a commented `config.ini` template |
 | `session-snap update [--list] [-y]` | install a newer release, then apply delivered patch archives ([update](#sec-update)) |
 | `session-snap reload` | switch a running `watch` to the installed release (live update, [update](#sec-update)) |
+| `session-snap desktop-entry [--remove]` | write (or remove) the entry with icon in the application menu ([menu entry](#sec-menuentry)) |
 | `session-snap --version` | print the version |
 
 Table: Options.
@@ -581,13 +586,38 @@ Every change is written to the log. The label is changed atomically inside the J
 
 ## Busy overlay
 
-While session-snap starts programs, maximizes or fullscreens windows, rebuilds the Alt-Tab order or terminates programs, the windows it opens take the focus. A notice in the terminal would be hidden. session-snap therefore shows a [desktop notification](glossary.md#gl-notification) **above all windows** for the duration of the work: title "session-snap arbeitet: Wiederherstellen" (or "Beenden"), the current step, the hint "Bitte nicht eingreifen", and a button **Abbrechen**. The notification is replaced in place at each step and removed at the end.
+While session-snap starts programs, maximizes or fullscreens windows, rebuilds the Alt-Tab order or terminates programs, the windows it opens take the focus. A notice in the terminal would be hidden. session-snap therefore shows a progress display **above all windows** for the duration of the work: title "session-snap arbeitet: Wiederherstellen" (or "Beenden"), a turning spinner, the current step, a progress bar "n / m" with the estimated time left ("noch ca. M:SS min"), the hint "Bitte nicht eingreifen. Esc oder Strg+C: Abbrechen", and a button **Abbrechen**. The display is updated at every step and removed at the end.
 
-Pressing **Abbrechen** interrupts session-snap exactly like Ctrl+C in the terminal: the current step stops, nothing further is started or terminated, the program ends with code 130.
+Pressing **Abbrechen**, **Esc** or **Ctrl+C** interrupts session-snap exactly like Ctrl+C in the terminal: the current step stops, nothing further is started or terminated, the program ends with code 130.
 
-The notification is sent with `gdbus` to the notification service of the session ([D-Bus](glossary.md#gl-dbus), interface `org.freedesktop.Notifications` [[notifyspec]](#ref-notifyspec)). It uses urgency *critical* and `expire_timeout` 0. The COSMIC notification service supports buttons (capability `actions`) and keeps notifications with timeout 0 until they are closed [[cosmicnotif]](#ref-cosmicnotif). The button press arrives as signal `ActionInvoked`, which session-snap reads with `gdbus monitor`. Without `gdbus` or without a session bus, for example over SSH, nothing is shown and only the terminal prints the steps. `overlay = no` in `config.ini` switches it off.
+Table: Styles of the overlay (key `overlay` in `config.ini`).
 
-Not verified on the target system: whether the notification is also drawn above **fullscreen** windows.
+| Value | Display | Input |
+|-------|---------|-------|
+| `fullscreen` (default; also `yes`) | dims all screens, card in the middle | takes keyboard and mouse: every key except Esc / Ctrl+C is swallowed, clicks reach only the card |
+| `corner` | box in the upper right corner | takes the keyboard (Esc / Ctrl+C only); the mouse still reaches the windows |
+| `notify` | desktop notification as up to 2.0 (step text and "n / m"; no spinner, no bar) | none; button *Abbrechen* in the notification |
+| `off` (also `no`) | nothing; only the terminal prints the steps | — |
+
+**How it works.** `fullscreen` and `corner` are a [Wayland layer-shell](glossary.md#gl-layershell) surface on the *overlay* layer, drawn above all windows including fullscreen ones [[layershell]](#ref-layershell). A small helper (`overlay_gtk.py`, GTK 3 with gtk-layer-shell [[gtklayershell]](#ref-gtklayershell)) runs with the **system Python** `/usr/bin/python3`, because the installed session-snap lives in a venv without PyGObject; it receives one JSON line per step and answers `cancel` when the user aborts. The keyboard is taken with keyboard interactivity *exclusive*; COSMIC then gives the keyboard focus to no other surface [[cosmicfocus]](#ref-cosmicfocus). While the Alt-Tab order is rebuilt, the overlay releases the keyboard for that step, because an activated window could otherwise not receive the focus and the order would not change; the button stays usable. Needed packages (Ubuntu 24.04 / Pop!_OS 24.04), installed with `sudo` because apt writes to `/usr`:
+
+```bash
+sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-gtklayershell-0.1 python3-gi-cairo
+```
+
+`python3-gi-cairo` is optional: without it the spinner is a turning character instead of a drawn ring. If the helper cannot run (package missing, no Wayland session, compositor without layer shell), session-snap falls back to the notification by itself and writes the reason to the log ("overlay helper unavailable: …"). `SESSION_SNAP_OVERLAY=corner` (or another style, `0` = off) overrides the configuration for one run; `SESSION_SNAP_OVERLAY_PYTHON` names another Python for the helper.
+
+**Notification style.** The notification is sent with `gdbus` to the notification service of the session ([D-Bus](glossary.md#gl-dbus), interface `org.freedesktop.Notifications` [[notifyspec]](#ref-notifyspec)). It uses urgency *critical* and `expire_timeout` 0. The COSMIC notification service supports buttons (capability `actions`) and keeps notifications with timeout 0 until they are closed [[cosmicnotif]](#ref-cosmicnotif). The button press arrives as signal `ActionInvoked`, which session-snap reads with `gdbus monitor`. Without `gdbus` or without a session bus, for example over SSH, nothing is shown and only the terminal prints the steps.
+
+**Timing in the log.** For each restore the log gets one line `reorder timing: waited X s for n of m windows, activated k in Y s`. It shows where the time of the Alt-Tab step goes (waiting for windows that are still opening, or the activations themselves) and is the basis for any later speed-up.
+
+Not verified on the target system: the overlay was tested on a headless sway compositor (both styles, Esc, Ctrl+C, other keys swallowed); the behaviour on COSMIC, in particular the released keyboard during the Alt-Tab step, is checked at the first real restore.
+
+<a id="sec-menuentry"></a>
+
+## Entry in the application menu
+
+`session-snap desktop-entry` writes `~/.local/share/applications/session-snap.desktop` and the icon `~/.local/share/icons/hicolor/scalable/apps/session-snap.svg`; `install.sh` runs it after every installation. The entry opens the interactive menu of session-snap in a terminal: in COSMIC Terminal (`cosmic-term -e …` [[cosmicterm]](#ref-cosmicterm)) if installed, else in the Debian default terminal `x-terminal-emulator -e …`, else with `Terminal=true` [[desktopentry]](#ref-desktopentry). Unchanged files are left alone; `session-snap desktop-entry --remove` removes both. Normal user, writes only below `~/.local/share`.
 
 <a id="sec-browser"></a>
 
@@ -1248,7 +1278,7 @@ Table: Keys of the section `[session-snap]` in config.ini.
 | `fullscreen` | `images` | categories whose windows go fullscreen (same values; wins over `maximize`); also switches the viewers' own fullscreen options on |
 | `maximize_timeout` | 20 | longest wait for the windows to appear, in seconds (also used for ordering) |
 | `order` | `saved` | Alt-Tab order after a restore **without questions** (`--all`): `saved` = as recorded, `keep` = unchanged |
-| `overlay` | `yes` | busy notice above all windows with the button *Abbrechen* ([overlay](#sec-overlay)) |
+| `overlay` | `fullscreen` | progress display above all windows: `fullscreen`, `corner`, `notify`, `off`; `yes` = `fullscreen`, `no` = `off` ([overlay](#sec-overlay)) |
 | `browser_session` | `yes` | browsers restore their last session ([browser sessions](#sec-browsersession)) |
 
 Table: Section `[player-options]` in config.ini — start options per program binary name, inserted for videos and — while images are in `fullscreen` — for image viewers.
@@ -1276,7 +1306,7 @@ maximize = videos
 fullscreen = images
 maximize_timeout = 20
 order = saved
-overlay = yes
+overlay = fullscreen
 browser_session = yes
 
 [player-options]
@@ -1890,7 +1920,9 @@ Table: Symptoms, causes and actions.
 | Chrome with Claude/WhatsApp not ended by `kill` | snapshot from a plain Chrome start, running Chrome started through an app (≤ 1.7.7) | update to 1.7.8 or later |
 | Chrome session not restored | Chrome still had a window (e.g. Claude) when restoring, or no COSMIC window list | close Chrome completely first, then restore |
 | Firefox session not restored | Firefox ran with that profile during the restore, or the profile was not detected at save | `session-snap show`: profile line under the Firefox entry |
-| No overlay appears | no `gdbus`, no session bus (SSH), or `overlay = no` | `command -v gdbus`; run from a terminal of the desktop session |
+| Only a notification appears, no progress card | helper cannot run: package `gir1.2-gtklayershell-0.1` missing, no Wayland session | `grep "overlay" ~/.local/state/session-snap/logs/session-snap.log`; install the packages listed under [overlay](#sec-overlay) |
+| No overlay appears | `overlay = off`, or no Wayland session and no `gdbus` / session bus (SSH) | run from a terminal of the desktop session; `command -v gdbus` |
+| No session-snap in the application menu | entry not written (installed before it existed) | `session-snap desktop-entry` |
 
 **VLC settings outside session-snap.** The two VLC symptoms above are caused by VLC itself and are fixed in VLC's own configuration, so that they apply to every VLC start. With VLC's PulseAudio output, a mute set in one VLC window is written to the audio stream; when the next stream is created (a new item), the sound server restores the mute state stored for all VLC streams together [[wpstream]](#ref-wpstream), and VLC shows it (`sink_input_info_cb()` → `aout_MuteReport()` in `pulse.c` [[vlcpulse]](#ref-vlcpulse)). The ALSA output keeps volume and mute in each VLC instance and applies them again to every new stream (`aout_SoftVolumeStart()` in `volume.h` [[vlcvolume]](#ref-vlcvolume)); the sound still goes through PipeWire via the package `pipewire-alsa`. The setting `volume-save` off keeps one VLC from passing its volume to the next one through `vlcrc`. Run as the normal user, with all VLC windows closed (VLC writes `vlcrc` when it ends):
 
@@ -1931,6 +1963,11 @@ Checked between 14 October and 1 November 2026; **[V]** content verified, **[I]*
 - <a id="ref-ctlseqs"></a>**[ctlseqs]** T. Dickey: *XTerm Control Sequences*. <https://www.invisible-island.net/xterm/ctlseqs/ctlseqs.html> — **[I]**
 - <a id="ref-escdelay"></a>**[escdelay]** ncurses: *curs_variables(3x)* (`ESCDELAY`). <https://www.man7.org/linux/man-pages/man3/curs_variables.3x.html> — **[I]**
 - <a id="ref-notifyspec"></a>**[notifyspec]** freedesktop.org: *Desktop Notifications Specification — D-BUS Protocol* (`Notify` with `replaces_id`, `actions`, `hints`, `expire_timeout`; signal `ActionInvoked`). <https://specifications.freedesktop.org/notification-spec/latest/ar01s09.html> — **[I]** (direct retrieval refused by the build machine's allowlist; content confirmed from the search-index excerpt)
+- <a id="ref-layershell"></a>**[layershell]** wlroots: *wlr-layer-shell-unstable-v1* protocol (layers `background` … `overlay`, `keyboard_interactivity` `none` / `exclusive` / `on_demand`), copy in the gtk-layer-shell repository `protocol/wlr-layer-shell-unstable-v1.xml`. <https://github.com/wmww/gtk-layer-shell/blob/master/protocol/wlr-layer-shell-unstable-v1.xml> — **[V]** (repository cloned on 23 Nov 2026)
+- <a id="ref-gtklayershell"></a>**[gtklayershell]** wmww: *gtk-layer-shell* — `gtk_layer_set_keyboard_mode()`, `GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE` (`include/gtk-layer-shell.h`); Ubuntu 24.04 package `gir1.2-gtklayershell-0.1` 0.8.2. <https://github.com/wmww/gtk-layer-shell> — **[V]** (repository cloned, package installed on 23 Nov 2026)
+- <a id="ref-cosmicfocus"></a>**[cosmicfocus]** System76: *cosmic-comp* source code, `src/shell/focus/mod.rs` — while an exclusive layer surface exists, only exclusive layer surfaces of the highest such layer get the keyboard focus. <https://github.com/pop-os/cosmic-comp> — **[V]** (repository cloned on 23 Nov 2026, commit `0681eaf`)
+- <a id="ref-cosmicterm"></a>**[cosmicterm]** System76: *cosmic-term* source code, `src/main.rs` — options `-e` / `--command` / `--` followed by program and arguments. <https://github.com/pop-os/cosmic-term> — **[V]** (repository cloned on 23 Nov 2026)
+- <a id="ref-desktopentry"></a>**[desktopentry]** freedesktop.org: *Desktop Entry Specification* — keys `Exec`, `Icon`, `Terminal`. <https://specifications.freedesktop.org/desktop-entry-spec/latest/> — **[I]**
 - <a id="ref-cosmicnotif"></a>**[cosmicnotif]** System76: *cosmic-notifications* source code — capabilities `body`, `icon-static`, `persistence`, `actions` (`src/subscriptions/notifications.rs`); timeout 0 = no expiry (`src/app.rs`). <https://github.com/pop-os/cosmic-notifications> — **[V]** (repository cloned on 1 Nov 2026)
 - <a id="ref-kdepwa"></a>**[kdepwa]** KDE Discuss: *Chrome PWA opens a new instance from App Launcher …* — native Wayland PWA window class `chrome-hnpfjngllnobngcgfapefoaidbinmjnm-Profile_1`. <https://discuss.kde.org/t/chrome-pwa-opens-a-new-instance-from-app-launcher-instead-of-focusing-existing-window-kde-plasma-6-6-wayland-fedora-44/46833> — **[V]**
 - <a id="ref-chromiumudd"></a>**[chromiumudd]** Chromium docs: *User Data Directory* — two running instances cannot share a user data directory; default `~/.config/google-chrome`. <https://chromium.googlesource.com/chromium/src/+show/HEAD/docs/user_data_dir.md> — **[V]**
