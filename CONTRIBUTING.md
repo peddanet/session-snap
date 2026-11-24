@@ -47,7 +47,7 @@ cd ~/Projects/session-snap && python3 -m venv .venv && .venv/bin/pip install -e 
 
 | Gate | Tool | Pass criterion |
 |---|---|---|
-| privacy | `tools/privacy_scan.py` | no local term in any file, path, commit message or tag of the whole history |
+| privacy | `tools/privacy_scan.py` | no local term in any file, path, commit message or tag of the whole history; fails if the local deny list is missing or empty (skipped only in CI, `CI=true`) |
 | shell | shellcheck | no finding |
 | format | pycodestyle | no finding, line length 100 |
 | lint | pylint | 10.00/10 incl. Google-style docstrings |

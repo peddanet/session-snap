@@ -627,7 +627,7 @@ Table: Quality gates.
 
 | Gate | Tool | Criterion |
 |------|------|-----------|
-| privacy | `tools/privacy_scan.py` | no term of the local deny list `~/.config/session-snap/privacy/denylist.txt` and no label of the user's own snapshots in any file of any commit, in any path, commit message or tag annotation of the whole history |
+| privacy | `tools/privacy_scan.py` | no term of the local deny list `~/.config/session-snap/privacy/denylist.txt` and no label of the user's own snapshots in any file of any commit, in any path, commit message or tag annotation of the whole history; without any local term the gate fails (exit 2), only in CI (`CI=true`) it is skipped |
 | shell | shellcheck | no finding in `install.sh`, `tools/*.sh`, the hook and `apply-release.sh` |
 | format | pycodestyle | no finding, line length 100 |
 | lint | pylint with docparams | 10.00/10 incl. Google-style docstrings (Args, Returns, Yields, Raises) |

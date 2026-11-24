@@ -8,6 +8,24 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+### Changed
+
+- README: what session-snap is for, three screenshots (main menu, picking files to restore,
+  progress display) made from the Lorem-ipsum demo data, requirements of the progress display.
+- Overlay style `fullscreen`: the mouse pointer is hidden over the dimmed area and shown
+  only over the card with the button *Abbrechen*.
+
+### Fixed
+
+- Overlay style `fullscreen`: the dim layer over the screens was not drawn (the window was
+  marked as painted by the program itself, so GTK skipped its translucent background); only
+  the card was visible.
+- Privacy gate: without any local term (deny list missing or empty) the scan now fails
+  instead of passing; only in CI (`CI=true`) it is skipped, as there is no local list there.
+- Tests T18 and T56 (interactive menu in a pseudo-terminal) waited without limit for the
+  child; now at most 30 s, then the child is killed and the test fails with the last terminal
+  output and the kernel function the child waited in.
+
 ## [2.1.0] - 2026-11-24
 
 ### Added

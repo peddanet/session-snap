@@ -594,7 +594,7 @@ Table: Styles of the overlay (key `overlay` in `config.ini`).
 
 | Value | Display | Input |
 |-------|---------|-------|
-| `fullscreen` (default; also `yes`) | dims all screens, card in the middle | takes keyboard and mouse: every key except Esc / Ctrl+C is swallowed, clicks reach only the card |
+| `fullscreen` (default; also `yes`) | dims all screens, card in the middle | takes keyboard and mouse: every key except Esc / Ctrl+C is swallowed, clicks reach only the card; the mouse pointer is hidden except over the card |
 | `corner` | box in the upper right corner | takes the keyboard (Esc / Ctrl+C only); the mouse still reaches the windows |
 | `notify` | desktop notification as up to 2.0 (step text and "n / m"; no spinner, no bar) | none; button *Abbrechen* in the notification |
 | `off` (also `no`) | nothing; only the terminal prints the steps | — |
