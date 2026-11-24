@@ -1,0 +1,40 @@
+# session-snap configuration
+# Lists are comma- or newline-separated; patterns follow fnmatch (*, ?, [..]).
+[session-snap]
+# Additional programs / Flatpak IDs that are NEVER recorded
+exclude =
+# Programs that are ALWAYS recorded as "rest", even without a .desktop file
+include =
+# Patterns matched against the FULL command line: such processes are never terminated by
+# kill (e.g. a separate Chrome instance for Claude: *--user-data-dir=*chrome-claude*)
+protect =
+# Additional binary names treated as image viewers / video players
+image_viewers =
+video_players =
+# Pause between two program starts in seconds
+delay = 0.4
+# Grace period after SIGTERM before a process counts as "not responding" (seconds)
+kill_timeout = 5
+# Windows maximized after a restore (COSMIC): videos, images, browser, rest, all, none
+maximize = videos
+# Windows shown fullscreen after a restore (COSMIC), same values; wins over "maximize"
+fullscreen = images
+# Alt-Tab order after a restore without questions (--all): saved = as recorded, keep = unchanged
+order = saved
+# Longest wait for the windows to appear (seconds)
+maximize_timeout = 20
+# Progress display above all windows while session-snap works (button "Abbrechen",
+# Esc / Ctrl+C): fullscreen = dim layer, blocks keyboard and mouse; corner = box in the upper
+# right corner, blocks the keyboard; notify = desktop notification; off = none (yes = fullscreen)
+overlay = fullscreen
+# Browsers: restore the last session (all profiles, windows, tabs): yes / no
+browser_session = yes
+
+# Start options on restore, per program binary name (empty value = none).
+# Videos: started paused. Image viewers: only used while images are in "fullscreen" above
+# (eog --fullscreen = eog's own borderless fullscreen mode).
+[player-options]
+mpv = --pause
+vlc = --start-paused --input-repeat=65535 --no-one-instance-when-started-from-file
+eog = --fullscreen
+nomacs = --fullscreen

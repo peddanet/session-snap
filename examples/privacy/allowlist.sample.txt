@@ -1,0 +1,8 @@
+# Sample allow list of the privacy gate (tools/privacy_scan.py).
+#
+# Copy to ~/.config/session-snap/privacy/allowlist.txt. Each line is a phrase in
+# which a deny-list term is allowed, for example a common word that is also part
+# of your deny list. A finding inside an allowed phrase is not reported.
+# One phrase per line, case-insensitive; "#" starts a comment.
+# Example: the deny list holds "ipsum", the demo data say "lorem ipsum".
+lorem ipsum
