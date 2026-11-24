@@ -8,6 +8,8 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-11-24
+
 ### Changed
 
 - README: what session-snap is for, three screenshots (main menu, picking files to restore,
