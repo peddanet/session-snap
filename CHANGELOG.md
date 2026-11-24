@@ -8,6 +8,16 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+## [2.1.3] - 2026-11-24
+
+### Fixed
+
+- Privacy gate: also checks the identities of the whole history (author and committer of
+  every commit, tagger of every tag) against the deny list, and refuses any e-mail address
+  that is not a no-reply address (`*@users.noreply.github.com`, `noreply@github.com`,
+  `noreply@anthropic.com`) or on the allow list. A real address from the global git
+  configuration no longer reaches the public history unnoticed.
+
 ## [2.1.2] - 2026-11-24
 
 ### Changed
