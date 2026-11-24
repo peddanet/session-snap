@@ -9,8 +9,10 @@ from pathlib import Path
 SCAN = Path(__file__).resolve().parents[1] / "tools" / "privacy_scan.py"
 
 
-def run_scan(tmp_path: Path, deny: str | None, ci: bool = False,
-             content: str = "lorem ipsum\n") -> subprocess.CompletedProcess:
+def run_scan(tmp_path: Path, deny: str | None,  # pylint: disable=too-many-arguments
+             ci: bool = False, content: str = "lorem ipsum\n",
+             email: str = "t@users.noreply.github.com",
+             allow: str | None = None) -> subprocess.CompletedProcess:
     """Run the scan on a one-commit repository with its own config and state folders.
 
     Args:
@@ -18,6 +20,8 @@ def run_scan(tmp_path: Path, deny: str | None, ci: bool = False,
         deny: Text of the deny list; None = no deny list file.
         ci: Set CI=true like GitHub Actions.
         content: Content of the committed file.
+        email: Author and committer address of the commit.
+        allow: Text of the allow list; None = no allow list file.
 
     Returns:
         The finished process.
@@ -30,8 +34,8 @@ def run_scan(tmp_path: Path, deny: str | None, ci: bool = False,
     env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path / "home"),
            "XDG_CONFIG_HOME": str(tmp_path / "config"),
            "XDG_STATE_HOME": str(tmp_path / "state"),
-           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.org",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.org"}
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": email,
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": email}
     if ci:
         env["CI"] = "true"
     for cmd in (["git", "init", "-q"], ["git", "add", "-A"], ["git", "commit", "-q", "-m", "x"]):
@@ -40,6 +44,8 @@ def run_scan(tmp_path: Path, deny: str | None, ci: bool = False,
         folder = tmp_path / "config" / "session-snap" / "privacy"
         folder.mkdir(parents=True)
         (folder / "denylist.txt").write_text(deny, encoding="utf-8")
+        if allow is not None:
+            (folder / "allowlist.txt").write_text(allow, encoding="utf-8")
     return subprocess.run([sys.executable, "tools/privacy_scan.py"], cwd=repo, env=env,
                           capture_output=True, text=True, check=False)
 
@@ -88,3 +94,21 @@ def test_term_found_and_clean(tmp_path: Path) -> None:
     clean = run_scan(tmp_path / "b", "quokka\n")
     assert clean.returncode == 0
     assert "0 finding(s)" in clean.stdout
+
+
+def test_identities(tmp_path: Path) -> None:
+    """A real address in author or committer is a finding even if no term matches; an
+    address on the allow list is accepted; a term inside an identity is found.
+
+    Args:
+        tmp_path: Temporary folder of the test.
+    """
+    real = run_scan(tmp_path / "a", "quokka\n", email="lorem@example.org")
+    assert real.returncode == 1
+    assert "e-mail address lorem@example.org is not a no-reply address" in real.stdout
+    allowed = run_scan(tmp_path / "b", "quokka\n", email="lorem@example.org",
+                       allow="lorem@example.org\n")
+    assert allowed.returncode == 0
+    named = run_scan(tmp_path / "c", "quokka\n", email="quokka@users.noreply.github.com")
+    assert named.returncode == 1
+    assert "identity (author of commit" in named.stdout

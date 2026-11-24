@@ -18,8 +18,16 @@ forbidden everywhere except inside an allowed phrase.
 Scanned are, because the repository is public with its whole history: the
 contents of every file in every commit reachable from any branch or tag
 (PDFs via ``pdftotext`` if installed), every file path that ever existed,
-all commit messages and all tag annotations. Matching ignores case; a term
+all commit messages and all tag annotations, and the identities: author and
+committer of every commit, tagger of every tag. Matching ignores case; a term
 must not be part of a longer word.
+
+Identities are checked twice: their names and addresses against the terms,
+and every e-mail address against the rule that only no-reply addresses may
+be public (``...@users.noreply.github.com``, ``noreply@github.com``,
+``noreply@anthropic.com``) unless the address is on the allow list. A real
+address in the global git configuration therefore stops the push even if it
+is not on the deny list.
 
 Without any local term (deny list missing or empty, no snapshot labels) the
 scan fails, because a gate must never pass only because its input is missing.
@@ -31,6 +39,7 @@ Runs as a normal user; reads only the repository and the user's own files.
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -40,6 +49,8 @@ import sys
 from pathlib import Path
 
 MIN_LENGTH = 3
+# e-mail addresses that may appear in the public history
+PUBLIC_EMAILS = ("*@users.noreply.github.com", "noreply@github.com", "noreply@anthropic.com")
 
 
 class PrivacyScan:
@@ -72,6 +83,9 @@ class PrivacyScan:
         self.allowed = re.compile("|".join(self._phrase(a) for a in phrases),
                                   re.IGNORECASE) if phrases else None
         self.allowed_count = len(phrases)
+        # an allow-list line that is an e-mail address permits that address as identity
+        self.allowed_emails = {a.lower() for a in phrases
+                               if re.fullmatch(r"[^\s@<>]+@[^\s@<>]+", a)}
         self.findings: list[tuple[str, str]] = []
 
     @staticmethod
@@ -230,6 +244,41 @@ class PrivacyScan:
             for match in self.pattern.finditer(line):
                 self.findings.append((f"{location}:{number}", match.group(1)))
 
+    def identities(self) -> list[tuple[str, str, str]]:
+        """Authors, committers and taggers of the whole history.
+
+        Returns:
+            ``(where, name, email)`` for every distinct identity.
+        """
+        seen: dict[tuple[str, str], str] = {}
+        fmt = "%h%x00%an%x00%ae%x00%cn%x00%ce"
+        for line in self._git("log", "--all", f"--format={fmt}").splitlines():
+            parts = line.split("\0")
+            if len(parts) == 5:
+                seen.setdefault((parts[1], parts[2]), f"author of commit {parts[0]}")
+                seen.setdefault((parts[3], parts[4]), f"committer of commit {parts[0]}")
+        tags = self._git("for-each-ref", "refs/tags",
+                         "--format=%(refname:short)%00%(taggername)%00%(taggeremail)")
+        for line in tags.splitlines():
+            parts = line.split("\0")
+            if len(parts) == 3 and parts[1]:
+                seen.setdefault((parts[1], parts[2].strip("<>")), f"tagger of {parts[0]}")
+        return [(where, name, email) for (name, email), where in sorted(seen.items())]
+
+    def check_identities(self, allowed_emails: set[str]) -> None:
+        """Search identities for terms and report e-mail addresses that are not public.
+
+        Args:
+            allowed_emails: Addresses from the allow list (lower case).
+        """
+        for where, name, email in self.identities():
+            self._search(f"identity ({where})", f"{name} <{email}>")
+            low = email.lower()
+            if low in allowed_emails or any(fnmatch.fnmatch(low, p) for p in PUBLIC_EMAILS):
+                continue
+            self.findings.append((f"identity ({where})",
+                                  f"e-mail address {email} is not a no-reply address"))
+
     def run(self) -> int:
         """Scan contents, paths, commit messages and tags of the whole history.
 
@@ -256,6 +305,7 @@ class PrivacyScan:
         self._search("commit messages", self._git("log", "--all", "--format=commit %h%n%B"))
         self._search("tag annotations",
                      self._git("for-each-ref", "refs/tags", "--format=%(refname) %(contents)"))
+        self.check_identities(self.allowed_emails)
         for location, term in self.findings:
             print(f"{location}: {term}")
         print(f"privacy scan: {len(self.terms)} term(s), {self.allowed_count} allowed "
