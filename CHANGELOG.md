@@ -12,6 +12,9 @@ were delivered as single files and imported into the repository afterwards (see
 
 - Privacy gate: without any local term (deny list missing or empty) the scan now fails
   instead of passing; only in CI (`CI=true`) it is skipped, as there is no local list there.
+- Tests T18 and T56 (interactive menu in a pseudo-terminal) waited without limit for the
+  child; now at most 30 s, then the child is killed and the test fails with the last terminal
+  output and the kernel function the child waited in.
 
 ## [2.1.0] - 2026-11-24
 

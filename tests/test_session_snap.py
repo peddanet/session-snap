@@ -232,6 +232,43 @@ class Base(unittest.TestCase):
         """
         return self.mine(ss.build_entries(self.cfg))
 
+    def wait_child(self, pid, fd, timeout=30.0):
+        """Wait for a child started with pty.fork, reading its terminal meanwhile.
+
+        Without a limit a hanging child would block the whole test run. On timeout the
+        child is killed and the test fails with what its terminal showed last and the
+        kernel function it waited in (/proc/PID/wchan).
+
+        Args:
+            pid (int): Process id of the child.
+            fd (int): Master side of its pseudo-terminal.
+            timeout (float): Seconds until the test fails.
+
+        Returns:
+            str: Terminal output read while waiting (escape sequences removed).
+        """
+        data, deadline = b"", time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                break
+            if select.select([fd], [], [], 0.1)[0]:
+                try:
+                    data += os.read(fd, 65536)
+                except OSError:
+                    pass
+        else:
+            try:
+                wchan = Path(f"/proc/{pid}/wchan").read_text(encoding="utf-8")
+            except OSError:
+                wchan = "?"
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            text = data.decode("utf-8", "replace")
+            self.fail(f"child {pid} still running after {timeout:.0f} s (waits in "
+                      f"{wchan!r}); last terminal output:\n{text[-2000:]}")
+        return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Z0-9]|\x1b[=>]", "",
+                      data.decode("utf-8", "replace"))
+
     def wait_for(self, pred, timeout=8.0, msg="condition"):
         """Poll `pred` until it is true or fail after `timeout` seconds.
 
@@ -788,7 +825,7 @@ class T3_Restore(Base):
             os.write(fd, key)
             screen += read(0.6)
         screen += read(2)
-        os.waitpid(pid, 0)
+        screen += self.wait_child(pid, fd)
         self.assertIn("werden muss.mkv", screen)  # long path shown completely
         for word in str(self.film).split():      # no word cut at the right edge
             self.assertIn(word, screen)
@@ -940,7 +977,7 @@ class T4_Kill(Base):
         self.assertIn("a.png", screen)
         os.write(fd, b"\r")
         screen = read(6)
-        os.waitpid(pid, 0)
+        screen += self.wait_child(pid, fd)
         self.assertIn("1 beendet", screen)
         self.wait_for(lambda: sorted(self._dummy_pids()) == keep, msg="only eog ended")
 
