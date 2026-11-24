@@ -87,12 +87,19 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 warn_unreachable = true
 
+# overlay_gtk.py runs with the system Python (PyGObject from apt, not in the venv)
+[[tool.mypy.overrides]]
+module = ["gi", "gi.*"]
+ignore_missing_imports = true
+
 [tool.coverage.run]
 source = ["session_snap"]
 branch = true
 # tests that start "python -m session_snap" as a process are measured too
 patch = ["subprocess"]
 parallel = true
+# runs only with the system Python on a Wayland desktop (GTK); tested by hand
+omit = ["*/session_snap/overlay_gtk.py"]
 
 [tool.coverage.report]
 fail_under = 90

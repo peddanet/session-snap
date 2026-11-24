@@ -8,6 +8,30 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-24
+
+### Added
+
+- Progress display above all windows while session-snap works: spinner, progress bar
+  "n / m" and time left; blocks the keyboard (style `fullscreen` also the mouse) except Esc,
+  Ctrl+C and the button *Abbrechen*, which interrupt like Ctrl+C. A Wayland layer-shell
+  surface drawn by `overlay_gtk.py` with the system Python (GTK 3, gtk-layer-shell); falls
+  back to the desktop notification if that is not possible.
+- `session-snap desktop-entry [--remove]`: entry with icon in the application menu that
+  opens the menu in a terminal (cosmic-term, else x-terminal-emulator); `install.sh` runs it.
+- Log line `reorder timing` with the time spent waiting for windows and activating them.
+
+### Changed
+
+- Config key `overlay` takes `fullscreen` (new default), `corner`, `notify` (the
+  notification of 2.0) or `off`; `yes` means `fullscreen`, `no` means `off`. The
+  notification shows "(n / m)" during steps with a count.
+
+### Fixed
+
+- install.sh stopped when it moved the test file of 1.8.0: the comment behind its
+  VERSION line became part of the backup name. Only the version number is taken now.
+
 ## [2.0.0] - 2026-11-22
 
 ### Added

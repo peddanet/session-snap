@@ -427,9 +427,9 @@ class T1_Unit(Base):
         env = {"PATH": f"{fake}:{os.environ['PATH']}", "SESSION_SNAP_OVERLAY": "1",
                "DBUS_SESSION_BUS_ADDRESS": "unix:path=/nonexistent"}
         with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()):
-            with ss.Overlay("Test") as ov:
+            with ss.Overlay("Test", "notify") as ov:
                 ss.busy("Schritt 1")
-                ss.busy("Schritt 2")
+                ss.busy("Schritt 2", 3, 7)
             self.assertIsNone(ss.Overlay.current)
             log = calls.read_text()
             self.assertEqual(log.count("Notifications.Notify"), 2)
@@ -441,13 +441,120 @@ class T1_Unit(Base):
             del ov
             with mock.patch.dict(os.environ, {"FAKE_CANCEL": "1"}):
                 with self.assertRaises(KeyboardInterrupt):
-                    with ss.Overlay("Test") as ov:
+                    with ss.Overlay("Test", "notify") as ov:
                         ss.busy("lange Arbeit")
                         time.sleep(5)
                 self.assertTrue(ov.cancelled)
         with mock.patch.dict(os.environ, {"SESSION_SNAP_OVERLAY": "1",
                                           "DBUS_SESSION_BUS_ADDRESS": ""}):
-            self.assertFalse(ss.Overlay("x").enabled)
+            self.assertFalse(ss.Overlay("x", "notify").enabled)
+
+    def test_59b_overlay_gtk_helper(self):
+        """overlay styles fullscreen/corner: the GTK helper gets one JSON line per step
+        (title, text, done, total) and keyboard on/off; "cancel" from the helper interrupts
+        like Ctrl+C; a helper that cannot show anything falls back to the notification;
+        config / environment select the style"""
+        rec = self.tmp / "helper-in.txt"
+        helper = self.tmp / "fake_overlay.py"
+        helper.write_text(
+            "import os, sys, time\n"
+            f"rec = open({str(rec)!r}, 'a')\n"
+            "rec.write('style ' + sys.argv[1] + '\\n'); rec.flush()\n"
+            "if os.environ.get('FAKE_UNAVAILABLE'):\n"
+            "    print('unavailable: no layer shell', flush=True)\n"
+            "    sys.exit(3)\n"
+            "print('ready', flush=True)\n"
+            "for line in sys.stdin:\n"
+            "    rec.write(line); rec.flush()\n"
+            "    if os.environ.get('FAKE_CANCEL') and 'lange' in line:\n"
+            "        print('cancel', flush=True)\n")
+        env = {"SESSION_SNAP_OVERLAY": "1", "SESSION_SNAP_OVERLAY_PYTHON": sys.executable,
+               "WAYLAND_DISPLAY": "wayland-test", "DBUS_SESSION_BUS_ADDRESS": ""}
+        with mock.patch.dict(os.environ, env), mock.patch.object(ss, "OVERLAY_HELPER", helper), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            with ss.Overlay("Test", "corner") as ov:
+                ss.busy("Starte 3 Programm(e) …", 0, 3)
+                ss.busy("Starte 3 Programm(e) …", 1, 3)
+                ss.overlay_keyboard(False)
+                ss.overlay_keyboard(True)
+            self.assertIsNone(ov.helper)
+            lines = rec.read_text().splitlines()
+            self.assertEqual(lines[0], "style corner")
+            msgs = [json.loads(x) for x in lines[1:]]
+            self.assertEqual(msgs[0], {"title": "Test", "text": "Starte 3 Programm(e) …",
+                                       "done": 0, "total": 3})
+            self.assertEqual(msgs[1]["done"], 1)
+            self.assertEqual(msgs[2:], [{"keyboard": False}, {"keyboard": True}])
+            self.assertEqual(out.getvalue().count("Starte 3"), 1)   # terminal: once
+            rec.unlink()
+            with mock.patch.dict(os.environ, {"FAKE_CANCEL": "1"}):
+                with self.assertRaises(KeyboardInterrupt):
+                    with ss.Overlay("Test", True) as ov:
+                        ss.busy("lange Arbeit")
+                        time.sleep(5)
+                self.assertTrue(ov.cancelled)
+            self.assertIn("style fullscreen", rec.read_text())
+            with mock.patch.dict(os.environ, {"FAKE_UNAVAILABLE": "1"}):
+                with ss.Overlay("Test", "fullscreen") as ov:
+                    ss.busy("Schritt")              # no gdbus/bus: notification off too
+                self.assertEqual(ov.style, "notify")
+                self.assertFalse(ov.enabled)
+            with mock.patch.dict(os.environ, {"SESSION_SNAP_OVERLAY_PYTHON": "/nonexistent"}):
+                ov = ss.Overlay("Test", "fullscreen")
+                ov.show("Schritt")
+                self.assertEqual(ov.style, "notify")
+                ov.close()
+        with mock.patch.dict(os.environ, {"WAYLAND_DISPLAY": "", "SESSION_SNAP_OVERLAY": "1"}):
+            self.assertEqual(ss.Overlay("x", "fullscreen").style, "notify")
+        with mock.patch.dict(os.environ, {"SESSION_SNAP_OVERLAY": "corner",
+                                          "WAYLAND_DISPLAY": "w"}):
+            self.assertEqual(ss.Overlay("x", "off").style, "corner")
+        with mock.patch.dict(os.environ, {"SESSION_SNAP_OVERLAY": "0"}):
+            self.assertFalse(ss.Overlay("x", "fullscreen").enabled)
+        self.assertFalse(ss.Overlay("x", False).enabled)
+        for value, style in (("yes", "fullscreen"), ("ja", "fullscreen"), ("no", "off"),
+                             ("off", "off"), ("Corner", "corner"), ("notify", "notify"),
+                             ("0", "off")):
+            self.assertEqual(ss.parse_overlay(value), style, value)
+        self.assertIn("overlay = fullscreen", ss.CONFIG_TEMPLATE)
+
+    def test_59c_desktop_entry(self):
+        """desktop-entry writes the menu entry and the icon below XDG_DATA_HOME, opens the
+        menu in cosmic-term (else x-terminal-emulator, else Terminal=true), leaves equal
+        files alone and removes both with --remove"""
+        data = self.tmp / "xdg-data"
+        fake = self.tmp / "termbin"
+        fake.mkdir(exist_ok=True)
+        env = {"XDG_DATA_HOME": str(data), "PATH": str(fake), "SESSION_SNAP_BIN": "/x/bin"}
+        with mock.patch.dict(os.environ, env):
+            ss.init_paths()
+            self.assertIn("Terminal=true\nCategories", ss.desktop_entry_text())
+            self.assertIn("Exec=/x/bin/session-snap\n", ss.desktop_entry_text())
+            (fake / "x-terminal-emulator").write_text("#!/bin/sh\n")
+            os.chmod(fake / "x-terminal-emulator", 0o755)  # nosec B103 - test stub
+            self.assertIn("Exec=x-terminal-emulator -e /x/bin/session-snap\n",
+                          ss.desktop_entry_text())
+            (fake / "cosmic-term").write_text("#!/bin/sh\n")
+            os.chmod(fake / "cosmic-term", 0o755)  # nosec B103 - test stub
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(ss.main(["desktop-entry"]), 0)
+            entry, icon = ss.desktop_entry_paths()
+            self.assertEqual(entry, data / "applications" / "session-snap.desktop")
+            text = entry.read_text()
+            self.assertIn("Exec=cosmic-term -e /x/bin/session-snap\n", text)
+            self.assertIn("Terminal=false", text)
+            self.assertIn("Icon=session-snap", text)
+            self.assertTrue(icon.read_text().startswith("<svg"))
+            self.assertEqual(out.getvalue().count("angelegt"), 2)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                ss.cmd_desktop_entry()
+            self.assertEqual(out.getvalue().count("unveraendert"), 2)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                ss.main(["desktop-entry", "--remove"])
+                ss.cmd_desktop_entry(remove=True)
+            self.assertFalse(entry.exists() or icon.exists())
+            self.assertEqual(out.getvalue().count("entfernt"), 2)
+        ss.init_paths()
 
     def test_63_manage_snapshots(self):
         """rename keeps the file name and sets the label; archive hides a snapshot from the

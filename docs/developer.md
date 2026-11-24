@@ -97,7 +97,8 @@ Table: Function reference by section.
 | entries | `is_look_var()`, `look_env()`, `session_look_env()`, `restore_env()`, `_entry()`, `_file_entries()`, `_flatpak_entries()`, `_host_entries()`, `build_entries()`, `signature()` | appearance variables, classification into entries, process identity |
 | snapshots | `snapshot_name()`, `save_snapshot()`, `load_snapshot()`, `list_snapshots()`, `archive_dir()`, `list_archived()`, `rename_snapshot()`, `move_snapshot()`, `delete_snapshot()` | storage rule, atomic write, management |
 | launching | `launch()`, `spawn_detached()`, `window_names()`, `window_mode()`, `_app_window_appears()`, `run_launches()` | checks, detached start, maximizing / fullscreen |
-| busy overlay | `Overlay`, `busy()` | notification above all windows, cancel button |
+| busy overlay | `parse_overlay()`, `Overlay`, `busy()`, `overlay_keyboard()`; helper module `overlay_gtk.py` | progress display above all windows (GTK layer-shell helper with the system Python, fallback notification), cancel by button / Esc / Ctrl+C |
+| menu entry | `desktop_entry_paths()`, `desktop_entry_text()`, `cmd_desktop_entry()` | `.desktop` file and SVG icon below `XDG_DATA_HOME` |
 | terminating | `protected_pids()`, `kill_targets()`, `force_safe()`, `terminate()`, `_relaunch_apps()` | targets, signals (SIGKILL without question for players/viewers), relaunch |
 | window control | `WaylandError`, `_Wl`, `app_matches()`, `WindowMaximizer` | Wayland wire protocol, maximizing, fullscreen |
 | multi-window programs | `list_windows()`, `title_candidates()`, `recent_files()`, `inotify_dirs()`, `resolve_title()`, `add_window_files()` | images of single-instance viewers |
@@ -712,7 +713,9 @@ Table: Test catalogue. Result: PASS on Python 3.11, 3.12 and 3.13 (Ubuntu 24.04.
 | T56 | interactive kill with the tree: root deselects all, category selected and unfolded, legend shown; only that category ends | R35 | PASS |
 | T57 | restore menu shows "n von m – x laufen bereits"; kill menu plain counts | R36 | PASS |
 | T58 | eog and nomacs get `--fullscreen` for images, the COSMIC image viewer gets no option; no duplicates | R34 | PASS |
-| T59 | overlay: notification with button *Abbrechen*, updates replace the same notification, closed at the end; button press interrupts like Ctrl+C; without bus nothing | R38 | PASS |
+| T59 | overlay style `notify`: notification with button *Abbrechen*, updates replace the same notification, closed at the end; button press interrupts like Ctrl+C; without bus nothing | R38 | PASS |
+| T59b | overlay styles `fullscreen` / `corner` with a fake helper: one JSON line per step, keyboard off/on, "cancel" interrupts like Ctrl+C; helper unavailable or missing Python → notification; config and environment select the style | R38 | PASS |
+| T59c | `desktop-entry`: entry and icon below `XDG_DATA_HOME`, terminal cosmic-term / x-terminal-emulator / `Terminal=true`, unchanged files kept, `--remove` | R46 | PASS |
 | T60 | app window of a Chrome started without `--app-id` found through the window list; kill starts it again | R40 | PASS |
 | T61 | window matching by desktop ID, without `-bin`, as `google-chrome`, web apps only by app id | R31 | PASS |
 | T62 | browser without window does not count as running; with window, or without window list, it does | R42 | PASS |
@@ -835,6 +838,8 @@ test_session_snap.py::T1_Unit::test_10_root_guard PASSED
 test_session_snap.py::T1_Unit::test_57_restore_menu_counts PASSED
 test_session_snap.py::T1_Unit::test_58_eog_fullscreen_option PASSED
 test_session_snap.py::T1_Unit::test_59_overlay_notification_and_cancel PASSED
+test_session_snap.py::T1_Unit::test_59b_overlay_gtk_helper PASSED
+test_session_snap.py::T1_Unit::test_59c_desktop_entry PASSED
 test_session_snap.py::T1_Unit::test_63_manage_snapshots PASSED
 ```
 
