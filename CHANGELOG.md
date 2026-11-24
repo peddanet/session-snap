@@ -8,6 +8,8 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-24
+
 ### Added
 
 - Progress display above all windows while session-snap works: spinner, progress bar
