@@ -8,6 +8,11 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+### Fixed
+
+- Privacy gate: without any local term (deny list missing or empty) the scan now fails
+  instead of passing; only in CI (`CI=true`) it is skipped, as there is no local list there.
+
 ## [2.1.0] - 2026-11-24
 
 ### Added
