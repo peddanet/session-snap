@@ -8,6 +8,11 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+### Changed
+
+- Overlay style `fullscreen`: the mouse pointer is hidden over the dimmed area and shown
+  only over the card with the button *Abbrechen*.
+
 ### Fixed
 
 - Privacy gate: without any local term (deny list missing or empty) the scan now fails
