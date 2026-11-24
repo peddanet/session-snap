@@ -8,6 +8,8 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+## [2.1.3] - 2026-11-24
+
 ### Fixed
 
 - Privacy gate: also checks the identities of the whole history (author and committer of
