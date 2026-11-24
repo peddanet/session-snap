@@ -4,5 +4,8 @@
 # which a deny-list term is allowed, for example a common word that is also part
 # of your deny list. A finding inside an allowed phrase is not reported.
 # One phrase per line, case-insensitive; "#" starts a comment.
+#
+# A line that is an e-mail address also permits that address as author,
+# committer or tagger (the gate otherwise accepts only no-reply addresses).
 # Example: the deny list holds "ipsum", the demo data say "lorem ipsum".
 lorem ipsum

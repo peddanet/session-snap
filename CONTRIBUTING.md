@@ -57,7 +57,8 @@ clone are in `examples/`:
 | `~/.local/share/applications/session-snap.desktop`, `~/.local/share/icons/hicolor/scalable/apps/session-snap.svg` | `session-snap desktop-entry` | `src/session_snap/data/session-snap.svg` | menu entry and icon |
 
 Create the privacy lists from the samples, then replace the sample terms with your own
-(real name, user name, host name, e-mail addresses, private folder names):
+(real name, user name, host name, e-mail addresses, private folder names). An e-mail
+address on its own line in the allow list may appear as author or committer:
 
 ~~~bash
 mkdir -p ~/.config/session-snap/privacy && cp -n examples/privacy/denylist.sample.txt ~/.config/session-snap/privacy/denylist.txt && cp -n examples/privacy/allowlist.sample.txt ~/.config/session-snap/privacy/allowlist.txt && chmod 600 ~/.config/session-snap/privacy/*.txt
@@ -74,7 +75,7 @@ mkdir -p ~/.config/session-snap/privacy && cp -n examples/privacy/denylist.sampl
 
 | Gate | Tool | Pass criterion |
 |---|---|---|
-| privacy | `tools/privacy_scan.py` | no local term in any file, path, commit message or tag of the whole history; fails if the local deny list is missing or empty (skipped only in CI, `CI=true`) |
+| privacy | `tools/privacy_scan.py` | no local term in any file, path, commit message, tag or identity (author, committer, tagger) of the whole history; every e-mail address of an identity is a no-reply address or on the allow list; fails if the local deny list is missing or empty (skipped only in CI, `CI=true`) |
 | shell | shellcheck | no finding |
 | format | pycodestyle | no finding, line length 100 |
 | lint | pylint | 10.00/10 incl. Google-style docstrings |
