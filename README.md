@@ -7,6 +7,25 @@ after a cold boot, and terminate them on request — a lightweight replacement f
 session-snap runs as the normal desktop user and uses the Python standard library only. Its
 user interface is German; the documentation is English.
 
+![Main menu of session-snap in a terminal](docs/images/main-menu.png)
+
+## What it is for
+
+- **Shut down without losing your place.** Evening: `session-snap save`, switch off. Morning:
+  `session-snap restore` reopens every video at its file (paused), every image fullscreen, the
+  browsers with their tabs and the other programs — in the Alt-Tab order you left them.
+- **Clear the desktop in one step.** `session-snap kill` closes the recorded programs after
+  showing what will close, so a presentation or a screen share starts from a clean desktop;
+  `restore` brings everything back afterwards.
+- **Keep several working sets.** Snapshots carry a label ("Evening", "Project A"); restore a
+  whole set, one category (only the videos) or single files picked in a tree.
+
+Hibernation (suspend to disk) keeps the complete memory image instead and needs a swap area
+about as large as the memory in use; session-snap records only what is needed to reopen the
+programs.
+
+![Picking single files to restore](docs/images/restore-selection.png)
+
 ## Features
 
 - **Snapshots** of all open videos, images, browsers and other programs, with complete file
@@ -22,6 +41,10 @@ user interface is German; the documentation is English.
   the order.
 - **Terminate** the recorded programs — never the terminal it runs in — after comparing the
   selection with what is open now; windows that would close as a side effect are shown first.
+- **Progress display above all windows** while programs start or close: spinner, progress bar
+  and time left; keyboard and mouse are blocked so a click cannot land in a window that is
+  just opening. Esc, Ctrl+C or the button *Abbrechen* cancel.
+- **Entry in the application menu** with its own icon; it opens the menu in a terminal.
 - **Update and live update**: `session-snap update` installs a newer release; the running
   background process switches to it without a restart (`session-snap reload`).
 
@@ -32,6 +55,7 @@ user interface is German; the documentation is English.
 | Desktop | Pop!_OS 24.04 LTS with COSMIC (Wayland). Without COSMIC, window functions are skipped. |
 | Python | Python 3.12 or newer with the `venv` module (`sudo apt install python3-venv`). |
 | Tools | `git` (for `install.sh` and `update`). |
+| Progress display | GTK 3 with gtk-layer-shell for the system Python (`sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-gtklayershell-0.1 python3-gi-cairo`); without it, a desktop notification is shown instead. |
 | User | Runs as the normal desktop user; refuses to run as root. |
 
 ## Installation
@@ -52,6 +76,8 @@ files move automatically on the first start — see
 
 ## Usage
 
+After the installation, **session-snap** is in the application menu. In a terminal:
+
 ~~~bash
 session-snap                      # interactive main menu
 session-snap save -l "Evening"    # record the session with a label
@@ -71,6 +97,12 @@ session-snap show "$demo/demo-snapshot.json"
 
 A snapshot given as a path is accepted once at least one snapshot of your own exists
 (`session-snap save` once).
+
+While session-snap starts or closes programs, this card stays above all windows:
+
+![Progress display during a restore](docs/images/progress-overlay.png)
+
+The screenshots show Lorem-ipsum demo data from `examples/`.
 
 ## Documentation
 

@@ -10,6 +10,8 @@ were delivered as single files and imported into the repository afterwards (see
 
 ### Changed
 
+- README: what session-snap is for, three screenshots (main menu, picking files to restore,
+  progress display) made from the Lorem-ipsum demo data, requirements of the progress display.
 - Overlay style `fullscreen`: the mouse pointer is hidden over the dimmed area and shown
   only over the card with the button *Abbrechen*.
 
