@@ -82,6 +82,14 @@ mkdir -p ~/.config/session-snap/privacy && cp -n examples/privacy/denylist.sampl
 | security | bandit | no finding |
 | tests | pytest + coverage | all pass, branch coverage at least 90 % |
 
+**Each tree is checked in full once.** One release calls `tools/check.sh` up to five
+times for only two different trees (feature, release). After a full green run the script
+stores the tree of the working copy, the Python version and a hash of the installed packages
+in `.git/checked-trees`; for a stored tree only `privacy` and `shell` run again - the privacy
+scan also reads commit messages and tags, which change without the tree - and the script says
+that the other gates were skipped. `CHECK_FULL=1 tools/check.sh` forces a full run; CI always
+runs in full.
+
 ## Privacy
 
 This repository is public. It must never contain real snapshots, logs, configuration, user

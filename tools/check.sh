@@ -17,6 +17,13 @@
 # Usage: tools/check.sh [--fast]
 #   --fast  skip the test gate (used for quick checks while editing)
 #
+# A tree that already passed ALL gates with the same tools is not checked in
+# full again: the release script and the pre-push hook call this script for
+# the same code several times. Privacy and shell always run (the privacy scan
+# also reads commit messages and tags, which change without the tree); the
+# other gates are skipped and the script says so. CHECK_FULL=1 forces a full
+# run; CI always runs in full (fresh clone, CI=true).
+#
 # Runs as a normal user; needs no root privileges.
 
 set -euo pipefail
@@ -55,8 +62,36 @@ command -v shellcheck >/dev/null || {
     exit 2
 }
 
+# --- check cache (dev-conventions handover, chapter 5; templates/check-cache.sh) ---
+# key = tree of the working copy (incl. uncommitted and untracked files, honouring
+# .gitignore) + Python version + installed packages; stored in .git/checked-trees
+CHECKED="$(git rev-parse --git-dir)/checked-trees"
+check_key() {
+    local idx tree
+    idx="$(mktemp)"
+    cp "$(git rev-parse --git-dir)/index" "$idx" 2>/dev/null || true
+    tree="$(GIT_INDEX_FILE="$idx" git add -A >/dev/null 2>&1 \
+            && GIT_INDEX_FILE="$idx" git write-tree)" || tree=""
+    rm -f "$idx"
+    [[ -n "$tree" ]] || return 1
+    printf '%s py%s deps-%s\n' "$tree" \
+        "$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')" \
+        "$(python3 -m pip list --format=freeze 2>/dev/null | sha256sum | cut -c1-12)"
+}
+KEY=""
+if [[ "${CI:-}" != "true" && "${CHECK_FULL:-0}" != "1" ]]; then
+    KEY="$(check_key)" || KEY=""
+fi
+
 gate privacy  python3 tools/privacy_scan.py
 gate shell    shellcheck install.sh tools/*.sh .githooks/pre-push src/session_snap/update/*.sh
+
+if [[ -n "$KEY" && -f "$CHECKED" ]] && grep -qxF "$KEY" "$CHECKED"; then
+    printf '\nThis tree passed all gates before (%s).\n' "${KEY%% *}"
+    printf 'format, lint, types, security and tests skipped - CHECK_FULL=1 forces them.\n'
+    printf '\nAll quality gates passed.\n'
+    exit 0
+fi
 gate format   pycodestyle --max-line-length=100 src tests tools examples
 gate lint     pylint --fail-under=10 src tests tools examples
 gate types    mypy
@@ -64,6 +99,11 @@ gate security bandit -q -c pyproject.toml -r src
 if (( FAST == 0 )); then
     gate tests python3 -m pytest -q -p no:cacheprovider \
         --cov=session_snap --cov-report=term
+    # remember the tree only after a FULL run; keep the last 50 entries
+    if [[ -n "$KEY" ]]; then
+        { [[ -f "$CHECKED" ]] && tail -n 49 "$CHECKED"; echo "$KEY"; } > "$CHECKED.tmp"
+        mv "$CHECKED.tmp" "$CHECKED"
+    fi
 fi
 
 printf '\nAll quality gates passed.\n'
