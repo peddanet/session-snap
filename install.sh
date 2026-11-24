@@ -116,7 +116,8 @@ old_file() {
 }
 for old in "$OLD_PROGRAM" "$OLD_TESTS"; do
   if old_file "$old"; then
-    version="$(sed -n 's/^VERSION = "\(.*\)"/\1/p' "$old" | head -n 1)"
+    # only the version number: the line may carry a comment (test file of 1.8.0)
+    version="$(sed -n 's/^VERSION = "\([0-9][0-9.]*\)".*/\1/p' "$old" | head -n 1)"
     mkdir -p "$BACKUP"
     target="$BACKUP/$(basename "$old") v$version"
     [ -e "$target" ] && target="$target $(date +%Y-%m-%d_%H-%M-%S)"
@@ -139,3 +140,5 @@ elif [ -n "$resolved" ] && [ "$resolved" != "$LINK" ]; then
 fi
 # first start of the new release: moves the data of the old layout, restarts the watcher
 "$LINK" watch --status || echo "NOTE: '$LINK watch --status' failed - see above"
+# entry with icon in the application menu (written by the program, unchanged files stay)
+"$LINK" desktop-entry || echo "NOTE: '$LINK desktop-entry' failed - see above"
