@@ -8,6 +8,8 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-11-24
+
 ### Changed
 
 - `tools/check.sh` runs format, lint, types, security and tests only once per tree: a tree
