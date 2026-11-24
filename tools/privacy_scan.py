@@ -19,10 +19,14 @@ Scanned are, because the repository is public with its whole history: the
 contents of every file in every commit reachable from any branch or tag
 (PDFs via ``pdftotext`` if installed), every file path that ever existed,
 all commit messages and all tag annotations. Matching ignores case; a term
-must not be part of a longer word. Without any local term the scan is
-skipped and says so, so the check is neutral in CI.
+must not be part of a longer word.
 
-Exit codes: 0 clean or skipped, 1 terms found.
+Without any local term (deny list missing or empty, no snapshot labels) the
+scan fails, because a gate must never pass only because its input is missing.
+In CI (environment variable ``CI=true``, set by GitHub Actions) there is no
+local list by design: there the scan is skipped and says so.
+
+Exit codes: 0 clean (or skipped in CI), 1 terms found, 2 no local terms.
 Runs as a normal user; reads only the repository and the user's own files.
 """
 from __future__ import annotations
@@ -230,12 +234,16 @@ class PrivacyScan:
         """Scan contents, paths, commit messages and tags of the whole history.
 
         Returns:
-            0 if clean or skipped, 1 if terms were found.
+            0 if clean (or skipped in CI), 1 if terms were found, 2 without local terms.
         """
         if self.pattern is None:
-            print("privacy scan skipped: no local terms "
-                  f"({self.config_dir() / 'denylist.txt'}, snapshot labels)")
-            return 0
+            where = f"{self.config_dir() / 'denylist.txt'}, snapshot labels"
+            if os.environ.get("CI") == "true":
+                print(f"privacy scan skipped in CI: no local terms ({where})")
+                return 0
+            print(f"privacy scan FAILED: no local terms ({where}) - the scan would check "
+                  "nothing. Create the deny list (one term per line).", file=sys.stderr)
+            return 2
         blobs = self.blobs()
         paths = sorted(set(blobs.values()))
         for path in paths:

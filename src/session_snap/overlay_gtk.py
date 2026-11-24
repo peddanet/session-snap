@@ -103,7 +103,9 @@ class OverlayWindow:  # pylint: disable=too-many-instance-attributes
             GtkLayerShell.set_anchor(self.win, edge_of(EDGE_RIGHT), True)
             GtkLayerShell.set_margin(self.win, edge_of(EDGE_UPPER), 16)
             GtkLayerShell.set_margin(self.win, edge_of(EDGE_RIGHT), 16)
-        self.win.set_app_paintable(True)
+        # fullscreen: GTK draws the translucent CSS background (dim layer) itself; with
+        # app_paintable it would skip it and the layer would stay fully transparent
+        self.win.set_app_paintable(style != "fullscreen")
         visual = Gdk.Screen.get_default().get_rgba_visual()
         if visual is not None:
             self.win.set_visual(visual)
@@ -138,10 +140,45 @@ class OverlayWindow:  # pylint: disable=too-many-instance-attributes
         card.pack_end(button, False, False, 0)
         self.win.add(card)
         self.win.connect("key-press-event", self.on_key)
+        self.card = card
+        self.pointer_visible: "bool | None" = None
+        if style == "fullscreen":
+            # the pointer is hidden over the dimmed area and shown over the card only
+            self.win.add_events(Gdk.EventMask.POINTER_MOTION_MASK)
+            self.win.connect("motion-notify-event", self.on_motion)
+            self.win.connect("realize", lambda _w: self.show_pointer(False))
         self.win.connect("destroy", lambda _w: Gtk.main_quit())
         self.win.show_all()
         self.progress.hide()
         self.eta.hide()
+
+    def show_pointer(self, visible: bool) -> None:
+        """Show or hide the mouse pointer over the overlay window.
+
+        Args:
+            visible: True = normal arrow, False = no pointer.
+        """
+        gdk_win = self.win.get_window()
+        if gdk_win is None or visible == self.pointer_visible:
+            return
+        self.pointer_visible = visible
+        name = "default" if visible else "none"
+        gdk_win.set_cursor(Gdk.Cursor.new_from_name(gdk_win.get_display(), name))
+
+    def on_motion(self, _w, event) -> bool:
+        """Show the pointer only while it is over the card.
+
+        Args:
+            event (Gdk.EventMotion): Pointer position in window coordinates.
+
+        Returns:
+            bool: False, let GTK handle the event as well.
+        """
+        box = self.card.get_allocation()
+        inside = (box.x <= event.x < box.x + box.width
+                  and box.y <= event.y < box.y + box.height)
+        self.show_pointer(inside)
+        return False
 
     def tick(self) -> bool:
         """Advance the spinner by one step.
