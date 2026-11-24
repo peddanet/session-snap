@@ -15,6 +15,9 @@ were delivered as single files and imported into the repository afterwards (see
 
 ### Fixed
 
+- Overlay style `fullscreen`: the dim layer over the screens was not drawn (the window was
+  marked as painted by the program itself, so GTK skipped its translucent background); only
+  the card was visible.
 - Privacy gate: without any local term (deny list missing or empty) the scan now fails
   instead of passing; only in CI (`CI=true`) it is skipped, as there is no local list there.
 - Tests T18 and T56 (interactive menu in a pseudo-terminal) waited without limit for the

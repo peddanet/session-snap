@@ -103,7 +103,9 @@ class OverlayWindow:  # pylint: disable=too-many-instance-attributes
             GtkLayerShell.set_anchor(self.win, edge_of(EDGE_RIGHT), True)
             GtkLayerShell.set_margin(self.win, edge_of(EDGE_UPPER), 16)
             GtkLayerShell.set_margin(self.win, edge_of(EDGE_RIGHT), 16)
-        self.win.set_app_paintable(True)
+        # fullscreen: GTK draws the translucent CSS background (dim layer) itself; with
+        # app_paintable it would skip it and the layer would stay fully transparent
+        self.win.set_app_paintable(style != "fullscreen")
         visual = Gdk.Screen.get_default().get_rgba_visual()
         if visual is not None:
             self.win.set_visual(visual)
