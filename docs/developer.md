@@ -98,7 +98,7 @@ Table: Function reference by section.
 | snapshots | `snapshot_name()`, `save_snapshot()`, `load_snapshot()`, `list_snapshots()`, `archive_dir()`, `list_archived()`, `rename_snapshot()`, `move_snapshot()`, `delete_snapshot()` | storage rule, atomic write, management |
 | launching | `launch()`, `spawn_detached()`, `window_names()`, `window_mode()`, `_app_window_appears()`, `run_launches()` | checks, detached start, maximizing / fullscreen |
 | busy overlay | `parse_overlay()`, `Overlay`, `busy()`, `overlay_keyboard()`; helper module `overlay_gtk.py` | progress display above all windows (GTK layer-shell helper with the system Python, fallback notification), cancel by button / Esc / Ctrl+C |
-| menu entry | `desktop_entry_paths()`, `desktop_entry_text()`, `cmd_desktop_entry()` | `.desktop` file and SVG icon below `XDG_DATA_HOME` |
+| menu entry | `ICON_FILE`, `desktop_entry_paths()`, `desktop_entry_text()`, `cmd_desktop_entry()` | `.desktop` file and the icon `src/session_snap/data/session-snap.svg` (package data) copied below `XDG_DATA_HOME` |
 | terminating | `protected_pids()`, `kill_targets()`, `force_safe()`, `terminate()`, `_relaunch_apps()` | targets, signals (SIGKILL without question for players/viewers), relaunch |
 | window control | `WaylandError`, `_Wl`, `app_matches()`, `WindowMaximizer` | Wayland wire protocol, maximizing, fullscreen |
 | multi-window programs | `list_windows()`, `title_candidates()`, `recent_files()`, `inotify_dirs()`, `resolve_title()`, `add_window_files()` | images of single-instance viewers |
@@ -107,6 +107,8 @@ Table: Function reference by section.
 | curses UI | `_getkey()`, `menu()`, `checklist()`, `_fold_header()`, `checklist_folding()`, `scope_count()`, `choose_scope()`, `choose_programs()` | interactive interface, tree selection |
 | commands | `cmd_save()`, `choose_order()`, `running_signatures()`, `cmd_restore()`, `cmd_kill()`, `cmd_manage()`, `cmd_programs()`, `cmd_diagnose()`, `cmd_list()`, `cmd_show()`, `cmd_config()`, `interactive_menu()` | user-visible functions |
 | CLI | `build_parser()`, `main()` | arguments, aliases, exit codes |
+
+**Files besides the code:** `src/session_snap/data/` holds package data installed with the program (the icon); `examples/` holds a sample of every file that lives outside the clone (`config.ini.sample`, `programs.ini.sample`, `privacy/denylist.sample.txt`, `privacy/allowlist.sample.txt`, the Lorem-ipsum `demo-snapshot.json` and `make_demo_media.py`); `docs/images/` holds the screenshots and the social preview of GitHub (`social-preview.svg` is the source of `social-preview.png`). Test T59d keeps the samples in step with the code; [CONTRIBUTING.md](../CONTRIBUTING.md) says where each file goes.
 
 **Conventions:** standard library only; lines at most 99 characters (the PDF listings must not wrap); code and comments in English, user interface texts in German without umlauts; functions that touch the user's processes always re-validate the process identity.
 

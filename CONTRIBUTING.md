@@ -41,6 +41,33 @@ cd ~/Projects/session-snap && python3 -m venv .venv && .venv/bin/pip install -e 
   the package in editable mode; it is ignored by git and never the installed program.
 - `git config core.hooksPath .githooks` makes git run all gates before every push.
 
+### Local files of a developer
+
+Everything needed to build, test and release is in the repository; the only files you
+create yourself are the two privacy lists. Samples of every file that lives outside the
+clone are in `examples/`:
+
+| File on your machine | Who writes it | Sample in the repository | Needed for |
+|---|---|---|---|
+| `~/.config/session-snap/privacy/denylist.txt` | **you, once** (mode 600) | `examples/privacy/denylist.sample.txt` | privacy gate: without a term it fails |
+| `~/.config/session-snap/privacy/allowlist.txt` | you, when needed | `examples/privacy/allowlist.sample.txt` | privacy gate: phrases in which a denied term is allowed |
+| `~/.config/session-snap/config.ini` | `session-snap config`, then you | `examples/config.ini.sample` (identical to the built-in template) | optional settings |
+| `~/.config/session-snap/programs.ini` | session-snap (menu "Programme waehlen") | `examples/programs.ini.sample` | program choice for videos and images |
+| `~/.local/state/session-snap/` | session-snap | `examples/demo-snapshot.json` (Lorem ipsum) | snapshots, logs, Alt-Tab order |
+| `~/.local/share/applications/session-snap.desktop`, `~/.local/share/icons/hicolor/scalable/apps/session-snap.svg` | `session-snap desktop-entry` | `src/session_snap/data/session-snap.svg` | menu entry and icon |
+
+Create the privacy lists from the samples, then replace the sample terms with your own
+(real name, user name, host name, e-mail addresses, private folder names):
+
+~~~bash
+mkdir -p ~/.config/session-snap/privacy && cp -n examples/privacy/denylist.sample.txt ~/.config/session-snap/privacy/denylist.txt && cp -n examples/privacy/allowlist.sample.txt ~/.config/session-snap/privacy/allowlist.txt && chmod 600 ~/.config/session-snap/privacy/*.txt
+~~~
+
+- Normal user: the files are yours and lie below `~/.config`.
+- `cp -n` never overwrites lists you already have.
+- The full folder layout (XDG base directories, what lives where and why) is in
+  [docs/user.md, folder layout](docs/user.md#sec-layout).
+
 ## Quality gates
 
 `tools/check.sh` (`--fast` skips the tests) runs locally, in the pre-push hook and in CI:
@@ -54,6 +81,14 @@ cd ~/Projects/session-snap && python3 -m venv .venv && .venv/bin/pip install -e 
 | types | mypy | no error |
 | security | bandit | no finding |
 | tests | pytest + coverage | all pass, branch coverage at least 90 % |
+
+**Each tree is checked in full once.** One release calls `tools/check.sh` up to five
+times for only two different trees (feature, release). After a full green run the script
+stores the tree of the working copy, the Python version and a hash of the installed packages
+in `.git/checked-trees`; for a stored tree only `privacy` and `shell` run again - the privacy
+scan also reads commit messages and tags, which change without the tree - and the script says
+that the other gates were skipped. `CHECK_FULL=1 tools/check.sh` forces a full run; CI always
+runs in full.
 
 ## Privacy
 
