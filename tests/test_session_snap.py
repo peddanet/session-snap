@@ -555,6 +555,23 @@ class T1_Unit(Base):
             self.assertEqual(ss.parse_overlay(value), style, value)
         self.assertIn("overlay = fullscreen", ss.CONFIG_TEMPLATE)
 
+    def test_59d_repository_samples(self):
+        """the repository carries every file a developer needs as a sample: config.ini equals
+        the built-in template, programs.ini is readable, the privacy lists hold terms and only
+        invented ones, the icon is a file of the package"""
+        root = Path(__file__).resolve().parents[1]
+        ex = root / "examples"
+        self.assertEqual((ex / "config.ini.sample").read_text(encoding="utf-8"),
+                         ss.CONFIG_TEMPLATE)
+        with mock.patch.object(ss, "PROGRAMS_FILE", ex / "programs.ini.sample"):
+            self.assertEqual(set(ss.load_programs()), {"video", "image"})
+        for name in ("denylist.sample.txt", "allowlist.sample.txt"):
+            lines = [x.strip() for x in (ex / "privacy" / name).read_text().splitlines()
+                     if x.strip() and not x.lstrip().startswith("#")]
+            self.assertTrue(lines, name)
+        self.assertTrue(ss.ICON_FILE.is_file())
+        self.assertTrue((root / "docs" / "images" / "social-preview.png").is_file())
+
     def test_59c_desktop_entry(self):
         """desktop-entry writes the menu entry and the icon below XDG_DATA_HOME, opens the
         menu in cosmic-term (else x-terminal-emulator, else Terminal=true), leaves equal
@@ -581,6 +598,7 @@ class T1_Unit(Base):
             self.assertIn("Exec=cosmic-term -e /x/bin/session-snap\n", text)
             self.assertIn("Terminal=false", text)
             self.assertIn("Icon=session-snap", text)
+            self.assertEqual(icon.read_text(), ss.ICON_FILE.read_text())
             self.assertTrue(icon.read_text().startswith("<svg"))
             self.assertEqual(out.getvalue().count("angelegt"), 2)
             with contextlib.redirect_stdout(io.StringIO()) as out:

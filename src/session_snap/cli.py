@@ -3379,17 +3379,8 @@ def install_watcher(start: bool = True) -> list:
 # of session-snap in a terminal. The terminal is chosen when the entry is written:
 # cosmic-term ("-e PROGRAM ARGS", src/main.rs of pop-os/cosmic-term), else the Debian
 # alternative x-terminal-emulator ("-e"), else Terminal=true for the desktop to decide.
-ICON_SVG = """\
-<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
-  <rect x="4" y="4" width="120" height="120" rx="26" fill="#2b6cb0"/>
-  <rect x="20" y="30" width="62" height="46" rx="6" fill="none" stroke="#e8f0fa"
-        stroke-width="6" opacity="0.55"/>
-  <rect x="38" y="46" width="70" height="52" rx="7" fill="#e8f0fa"/>
-  <rect x="38" y="46" width="70" height="12" rx="6" fill="#f6ad55"/>
-  <circle cx="73" cy="78" r="13" fill="none" stroke="#2b6cb0" stroke-width="6"/>
-  <circle cx="73" cy="78" r="4" fill="#2b6cb0"/>
-</svg>
-"""
+# the icon is a file of the package (src/session_snap/data/session-snap.svg), installed with it
+ICON_FILE = Path(__file__).resolve().with_name("data") / "session-snap.svg"
 
 
 def desktop_entry_paths() -> tuple[Path, Path]:
@@ -3432,7 +3423,8 @@ def cmd_desktop_entry(remove: bool = False) -> int:
         0.
     """
     entry, icon = desktop_entry_paths()
-    for f, text in ((entry, desktop_entry_text()), (icon, ICON_SVG)):
+    icon_svg = ICON_FILE.read_text(encoding="utf-8")
+    for f, text in ((entry, desktop_entry_text()), (icon, icon_svg)):
         if remove:
             if f.exists():
                 f.unlink()

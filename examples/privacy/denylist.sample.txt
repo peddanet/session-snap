@@ -1,0 +1,13 @@
+# Sample deny list of the privacy gate (tools/privacy_scan.py).
+#
+# Copy to ~/.config/session-snap/privacy/denylist.txt (mode 600) and replace the
+# sample terms with your own: anything that must never appear in the public
+# repository - your real name, user name, host name, e-mail addresses, private
+# folder names, names of people. One term per line, matched case-insensitively
+# as a whole word; "#" starts a comment. The real list never goes into git.
+#
+# Without at least one term the gate fails (outside CI).
+loremuser
+ipsum-laptop
+lorem.ipsum@example.org
+Dolor Sitamet

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <rect width="1280" height="640" fill="#1e2127"/>
+  <g transform="translate(110,176) scale(2.25)">
+    <rect x="4" y="4" width="120" height="120" rx="26" fill="#2b6cb0"/>
+    <rect x="20" y="30" width="62" height="46" rx="6" fill="none" stroke="#e8f0fa" stroke-width="6" opacity="0.55"/>
+    <rect x="38" y="46" width="70" height="52" rx="7" fill="#e8f0fa"/>
+    <rect x="38" y="46" width="70" height="12" rx="6" fill="#f6ad55"/>
+    <circle cx="73" cy="78" r="13" fill="none" stroke="#2b6cb0" stroke-width="6"/>
+    <circle cx="73" cy="78" r="4" fill="#2b6cb0"/>
+  </g>
+  <text x="460" y="285" font-family="DejaVu Sans" font-weight="bold" font-size="86" fill="#f0f0f0">session-snap</text>
+  <text x="462" y="355" font-family="DejaVu Sans" font-size="34" fill="#c8ccd4">Save, restore and close your desktop session</text>
+  <text x="462" y="405" font-family="DejaVu Sans" font-size="34" fill="#c8ccd4">videos, images, browsers - in Alt-Tab order</text>
+  <text x="462" y="480" font-family="DejaVu Sans Mono" font-size="26" fill="#f6ad55">Pop!_OS / COSMIC · Wayland · Python</text>
+</svg>

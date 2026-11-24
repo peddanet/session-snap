@@ -8,6 +8,15 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+### Changed
+
+- The icon is a file of the package (`src/session_snap/data/session-snap.svg`) instead of a
+  string in the code; `desktop-entry` copies it.
+- Samples of every file outside the clone in `examples/` (`config.ini.sample`,
+  `programs.ini.sample`, `privacy/denylist.sample.txt`, `privacy/allowlist.sample.txt`) and
+  the social preview of GitHub with its SVG source in `docs/images/`; CONTRIBUTING explains
+  where each local file goes.
+
 ## [2.1.1] - 2026-11-24
 
 ### Changed

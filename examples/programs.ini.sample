@@ -1,0 +1,8 @@
+# written by session-snap: programs used to open videos/images on restore
+# value = desktop-file ID (e.g. mpv.desktop) or a command (e.g. mpv)
+#
+# Sample of ~/.config/session-snap/programs.ini. session-snap writes this file
+# itself (main menu "Programme waehlen"); a copy is only needed to preset the choice.
+[programs]
+video = mpv.desktop
+image = org.gnome.eog.desktop
