@@ -71,14 +71,15 @@ mkdir -p ~/.config/session-snap/privacy && cp -n examples/privacy/denylist.sampl
 
 ## Quality gates
 
-`tools/check.sh` (`--fast` skips the tests) runs locally, in the pre-push hook and in CI:
+`tools/check.sh` (`--fast` skips the tests, `--only <gate>` runs one gate) runs locally, in the
+pre-push hook and in CI (one step per gate):
 
 | Gate | Tool | Pass criterion |
 |---|---|---|
 | privacy | `tools/privacy_scan.py` | no local term in any file, path, commit message, tag or identity (author, committer, tagger) of the whole history; every e-mail address of an identity is a no-reply address or on the allow list; fails if the local deny list is missing or empty (skipped only in CI, `CI=true`) |
 | shell | shellcheck | no finding |
-| format | pycodestyle | no finding, line length 100 |
-| lint | pylint | 10.00/10 incl. Google-style docstrings |
+| format | pycodestyle | no finding, line length 120 |
+| lint | pylint | 10.00/10 incl. Google-style docstrings, line length 120 |
 | types | mypy | no error |
 | security | bandit | no finding |
 | tests | pytest + coverage | all pass, branch coverage at least 90 % |
@@ -108,7 +109,7 @@ is merged, and nothing is pushed or installed without a question.
 
 | Current branch   | What the script does                                                   |
 |------------------|------------------------------------------------------------------------|
-| `feature/<name>` | rebase onto `develop`, gates, merge `--no-ff` into `develop`, then asks "Release jetzt bauen?" |
+| `feature/<name>` | rebase onto `develop`, gates, merge `--no-ff` into `develop`, then asks "Build the release now?" |
 | `develop`        | release of the collected features: asks the part (default minor) and the release message |
 | `hotfix/<name>`  | patch release into `main` and back into `develop`                       |
 | `main`           | refused                                                                |
@@ -131,8 +132,8 @@ tools/check.sh && git add -A && git commit -m "<what and why>"
 tools/release.sh
 ~~~
 
-Answer `n` to "Release jetzt bauen?" to collect further features on
-`develop` (optionally push `develop`); answer `j` to release at once. To
+Answer `n` to "Build the release now? [y/N]" to collect further features on
+`develop` (optionally push `develop`); answer `y` to release at once. To
 release the collected features later:
 
 ~~~bash
@@ -195,6 +196,17 @@ shell script; `sudo apt install shellcheck` once). It activates the
 development venv `.venv` by itself, so no `source .venv/bin/activate` is
 needed before it, before `git push` (pre-push hook) or before
 `tools/release.sh`.
+
+### Review before the release
+
+Every delivered change is reviewed in Beyond Compare before it is released:
+
+~~~bash
+tools/review.sh develop feature/<short-name>
+~~~
+
+`tools/review.sh` copies both refs as real files into folders named after ref and
+hash (left = old, right = new); the working tree is not touched.
 
 
 <a id="history"></a>

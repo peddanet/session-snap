@@ -1,64 +1,91 @@
 #!/usr/bin/env bash
-# Quality gates for session-snap.
+# check.sh - the quality gates of session-snap (from templates/check.sh of the dev-conventions bundle).
 #
-# Runs the same checks locally (pre-push hook) and in CI, so a green local
-# run predicts a green pipeline. Every gate must pass; the script stops at
-# the first failure and returns its exit code.
+# Usage:  tools/check.sh [--fast] [--only GATE]
 #
-#   0. privacy  no locally listed term in the files, paths, commit messages
-#               and tags of the whole history (tools/privacy_scan.py)
-#   0. shell    shellcheck for every shell script
-#   1. format   pycodestyle, max line length 100
-#   2. lint     pylint incl. Google-style docstring checks, score 10.00/10
-#   3. types    mypy (config in pyproject.toml)
-#   4. security bandit (config in pyproject.toml)
-#   5. tests    pytest with branch coverage, threshold in pyproject.toml
+#   --fast       skip the gate "tests" (quick checks while editing)
+#   --only GATE  run one gate only (CI: one step per gate)
+#   -h, --help   this text
 #
-# Usage: tools/check.sh [--fast]
-#   --fast  skip the test gate (used for quick checks while editing)
+# Gates, in this order: privacy, shell, format, lint, types, security, tests.
+# The same script runs locally, in the pre-push hook and in CI, so a green
+# local run predicts a green pipeline. Every gate prints one result line
+# (PASS / FAIL / SKIP, one fact, duration); the first failing gate stops the
+# run and shows the end of its output.
+# Exit code: 0 all passed, 1 a gate failed, 2 wrong usage or missing tool/file.
 #
-# A tree that already passed ALL gates with the same tools is not checked in
-# full again: the release script and the pre-push hook call this script for
-# the same code several times. Privacy and shell always run (the privacy scan
+#   privacy   no locally listed term in the files, paths, commit messages,
+#             tags and identities of the whole history (tools/privacy_scan.py)
+#   shell     shellcheck for every shell script
+#   format    pycodestyle, max line length 120
+#   lint      pylint incl. Google-style docstring checks, score 10.00/10
+#   types     mypy (config in pyproject.toml)
+#   security  bandit (config in pyproject.toml)
+#   tests     pytest with branch coverage, threshold in pyproject.toml
+#
+# Each tree is checked in full once: a tree that already passed ALL gates
+# with the same tools runs only privacy and shell again (the privacy scan
 # also reads commit messages and tags, which change without the tree); the
-# other gates are skipped and the script says so. CHECK_FULL=1 forces a full
-# run; CI always runs in full (fresh clone, CI=true).
+# other gates are skipped and the script says so. CHECK_FULL=1 forces a
+# full run; CI (CI=true) always runs in full; --only never uses the cache.
 #
+# Needs tools/output.sh (dev-conventions bundle) next to this script.
 # Runs as a normal user; needs no root privileges.
-
 set -euo pipefail
-
-cd "$(dirname "$0")/.."
+cd "$(git rev-parse --show-toplevel)"
+if [[ ! -f tools/output.sh ]]; then
+    echo "check.sh: tools/output.sh is missing - copy tools/output.sh of the dev-conventions bundle" >&2
+    exit 2
+fi
+# shellcheck source=tools/output.sh disable=SC1091  # path chosen at run time
+source tools/output.sh
 export PYTHONPATH="src:tests${PYTHONPATH:+:$PYTHONPATH}"
 
 # Development venv: an active one is used as it is; otherwise .venv of the
-# project is activated for this script only - the activation ends with the
-# script, the calling shell stays as it was. CI has none and installs the
+# project is activated for this script only. CI has none and installs the
 # tools directly. Nothing is created or installed here.
 if [[ -z "${VIRTUAL_ENV:-}" && -f .venv/bin/activate ]]; then
     # shellcheck disable=SC1091  # path chosen at run time
     source .venv/bin/activate
-    echo "venv: .venv (activated for this check)"
+    detail "venv: .venv (activated for this check)"
 fi
 
-FAST=0
-[[ "${1:-}" == "--fast" ]] && FAST=1
+GATES=(privacy shell format lint types security tests)
+declare -A ABOUT=(
+    [privacy]="tools/privacy_scan.py · files, paths, history"
+    [shell]="shellcheck"
+    [format]="pycodestyle · max line 120"
+    [lint]="pylint · 10.00/10, max line 120"
+    [types]="mypy"
+    [security]="bandit"
+    [tests]="pytest + coverage · branch ≥ 90 %"
+)
 
-gate() {
-    local name="$1"; shift
-    printf '\n=== %-8s %s\n' "$name" "$*"
-    "$@"
-}
+FAST=false
+ONLY=""
+while (($#)); do
+    case "$1" in
+        --fast) FAST=true ;;
+        --only) ONLY="${2:-}"; shift ;;
+        -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+        *) echo "check.sh: unknown argument $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+if [[ -n "$ONLY" && -z "${ABOUT[$ONLY]:-}" ]]; then
+    echo "check.sh: unknown gate '$ONLY' - one of: ${GATES[*]}" >&2
+    exit 2
+fi
 
 for tool in pycodestyle pylint mypy bandit pytest; do
     command -v "$tool" >/dev/null || {
-        echo "missing tool: $tool - create the development venv once (normal user):" >&2
+        echo "check.sh: missing tool: $tool - create the development venv once (normal user):" >&2
         echo "  python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'" >&2
         exit 2
     }
 done
 command -v shellcheck >/dev/null || {
-    echo "missing tool: shellcheck  ->  sudo apt install shellcheck" >&2
+    echo "check.sh: missing tool: shellcheck  ->  sudo apt install shellcheck" >&2
     exit 2
 }
 
@@ -79,31 +106,85 @@ check_key() {
         "$(python3 -m pip list --format=freeze 2>/dev/null | sha256sum | cut -c1-12)"
 }
 KEY=""
-if [[ "${CI:-}" != "true" && "${CHECK_FULL:-0}" != "1" ]]; then
+if [[ -z "$ONLY" && "${CI:-}" != "true" && "${CHECK_FULL:-0}" != "1" ]]; then
     KEY="$(check_key)" || KEY=""
 fi
-
-gate privacy  python3 tools/privacy_scan.py
-gate shell    shellcheck install.sh tools/*.sh .githooks/pre-push src/session_snap/update/*.sh
-
+KNOWN=false
 if [[ -n "$KEY" && -f "$CHECKED" ]] && grep -qxF "$KEY" "$CHECKED"; then
-    printf '\nThis tree passed all gates before (%s).\n' "${KEY%% *}"
-    printf 'format, lint, types, security and tests skipped - CHECK_FULL=1 forces them.\n'
-    printf '\nAll quality gates passed.\n'
-    exit 0
+    KNOWN=true
 fi
-gate format   pycodestyle --max-line-length=100 src tests tools examples
-gate lint     pylint --fail-under=10 src tests tools examples
-gate types    mypy
-gate security bandit -q -c pyproject.toml -r src
-if (( FAST == 0 )); then
-    gate tests python3 -m pytest -q -p no:cacheprovider \
-        --cov=session_snap --cov-report=term
-    # remember the tree only after a FULL run; keep the last 50 entries
-    if [[ -n "$KEY" ]]; then
+
+# --- the gates: each prints its own output; its last line is the fact -------------
+shell_scripts() {
+    local files=()
+    mapfile -t files < <(git ls-files 'install.sh' 'tools/*.sh' '.githooks/*' 'src/session_snap/update/*.sh')
+    ((${#files[@]})) || { echo "no shell scripts found"; return 1; }
+    shellcheck "${files[@]}"
+    echo "${#files[@]} scripts, no finding"
+}
+run_gate() {
+    case "$1" in
+        privacy)  python3 tools/privacy_scan.py ;;
+        shell)    shell_scripts ;;
+        format)   pycodestyle --max-line-length=120 src tests tools examples && echo "no finding" ;;
+        lint)     pylint --fail-under=10 src tests tools examples ;;
+        types)    mypy ;;
+        security) bandit -q -c pyproject.toml -r src && echo "no finding" ;;
+        tests)    python3 -m pytest -q -p no:cacheprovider --cov=session_snap --cov-report=term ;;
+    esac
+}
+
+# --- run ---------------------------------------------------------------------------
+START=$SECONDS
+LOG="$(mktemp)"
+trap 'rm -f "$LOG"' EXIT
+selected=("${GATES[@]}")
+[[ -z "$ONLY" ]] || selected=("$ONLY")
+title "Quality gates"
+n=0 failed="" passed=0 skipped=0
+for gate in "${selected[@]}"; do
+    n=$((n + 1))
+    stage "[$n/${#selected[@]}] $gate" "${ABOUT[$gate]}"
+    if $KNOWN && [[ "$gate" != privacy && "$gate" != shell ]]; then
+        skip "$gate" "tree passed before"
+        skipped=$((skipped + 1))
+        continue
+    fi
+    if $FAST && [[ "$gate" == tests ]]; then
+        skip "tests" "--fast"
+        skipped=$((skipped + 1))
+        continue
+    fi
+    begin=$SECONDS code=0
+    if [[ "$gate" == tests ]]; then
+        run_gate "$gate" 2>&1 | tee "$LOG" || code=${PIPESTATUS[0]}
+    else
+        run_gate "$gate" >"$LOG" 2>&1 || code=$?
+    fi
+    fact="$(grep -v '^[[:space:]]*$' "$LOG" | tail -n 1 | cut -c 1-44)"
+    if ((code == 0)); then
+        pass "${fact:-$gate}" "$((SECONDS - begin)) s"
+        passed=$((passed + 1))
+    else
+        fail "$gate" "$((SECONDS - begin)) s"
+        [[ "$gate" == tests ]] || tail -n 30 "$LOG" | while IFS= read -r line; do detail "$line"; done
+        failed="$gate"
+        break
+    fi
+done
+
+title "Result"
+if [[ -z "$failed" ]]; then
+    if $KNOWN; then
+        note "this tree passed all gates before (${KEY%% *}); CHECK_FULL=1 forces a full run"
+    elif [[ -n "$KEY" ]] && ! $FAST; then
+        # remember the tree only after a FULL run; keep the last 50 entries
         { [[ -f "$CHECKED" ]] && tail -n 49 "$CHECKED"; echo "$KEY"; } > "$CHECKED.tmp"
         mv "$CHECKED.tmp" "$CHECKED"
     fi
+    info "${G}${B}DONE${X}  $passed passed, $skipped skipped  $(ts "$((SECONDS - START)) s")"
+    exit 0
 fi
-
-printf '\nAll quality gates passed.\n'
+info "${R}${B}FAILED${X}  gate $failed  $(ts "$((SECONDS - START)) s")"
+note "nothing was changed; fix the finding and run tools/check.sh again"
+exit 1

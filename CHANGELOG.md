@@ -8,6 +8,24 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+### Changed
+
+- Development tools follow dev-conventions bundle v18. `tools/check.sh` prints the gates in
+  the common console look (numbered stages, one PASS/FAIL/SKIP line each, result block) and
+  runs a single gate with `--only <gate>`; `tools/release.sh` (GitHub variant), `tools/same-code.sh`
+  and the new `tools/output.sh` come from the bundle, with English dialogs (`[y/N]`), a
+  watcher of the GitHub checks and a time measurement of every step.
+- Line length 120 for pycodestyle and pylint (was 100).
+- CI runs one step per gate (`gate: <name>`), so GitHub shows which gate failed; the
+  triggers are unchanged (pull requests into `main`/`develop`, release check on tags).
+- pytest shows a progress bar and the five slowest tests (`tools/pytest_progress.py`,
+  loaded from `tests/conftest.py`; `PYTEST_PROGRESS=0` switches it off).
+
+### Added
+
+- `tools/review.sh <base> <branch>`: four-eyes review of two refs in Beyond Compare, both
+  sides as named real copies.
+
 ## [2.1.3] - 2026-11-24
 
 ### Fixed

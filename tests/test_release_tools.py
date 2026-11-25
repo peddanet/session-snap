@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
+TIMEOUT = 300   # seconds per child process: a hanging script fails the test instead of the run
 CHANGELOG = """# Changelog
 
 ## [Unreleased]
@@ -33,6 +34,15 @@ db = os.path.join(state, "prs.json")
 prs = json.load(open(db, encoding="utf-8")) if os.path.exists(db) else []
 def save():
     json.dump(prs, open(db, "w", encoding="utf-8"))
+def fails(what):
+    """True while FAKE_GH_FAIL_<WHAT> failures are left (one counted per call)."""
+    left = int(os.environ.get("FAKE_GH_FAIL_" + what.upper(), "0"))
+    counter = os.path.join(state, "failed-" + what)
+    done = int(open(counter, encoding="utf-8").read()) if os.path.exists(counter) else 0
+    if done >= left:
+        return False
+    open(counter, "w", encoding="utf-8").write(str(done + 1))
+    return True
 cmd = args[:2]
 if cmd == ["auth", "status"]:
     sys.exit(0)
@@ -43,17 +53,46 @@ if cmd == ["pr", "list"]:
             break
     sys.exit(0)
 if cmd == ["pr", "create"]:
+    if fails("create"):
+        if os.environ.get("FAKE_GH_CREATED_ANYWAY"):
+            prs.append({"head": opt("--head"), "base": opt("--base"), "state": "open"})
+            save()
+        sys.exit("GraphQL: Something went wrong while executing your query")
     prs.append({"head": opt("--head"), "base": opt("--base"), "state": "open"})
     save()
     print(f"https://example.invalid/pull/{len(prs)}")
     sys.exit(0)
+if cmd == ["pr", "checks"] and opt("--json") in ("name,bucket", "link,bucket"):
+    # FAKE_GH_STATES: bucket per query, comma separated, the last one repeats;
+    # default from FAKE_GH_CHECKS (1 = fail, else pass)
+    states = os.environ.get("FAKE_GH_STATES") or (
+        "fail" if os.environ.get("FAKE_GH_CHECKS") == "1" else "pass")
+    states = states.split(",")
+    queries = os.path.join(state, "state-queries")
+    count = int(open(queries, encoding="utf-8").read()) if os.path.exists(queries) else 0
+    if opt("--json") == "name,bucket":
+        open(queries, "w", encoding="utf-8").write(str(count + 1))
+        bucket = states[min(count, len(states) - 1)]
+        print(f"gates (3.12)\tpass\ngates (3.14)\t{bucket}")
+    elif "fail" in states:
+        print("https://github.com/o/r/actions/runs/41/job/9")
+    sys.exit(0)
+if cmd == ["pr", "checks"] and "--json" in args:
+    polls = os.path.join(state, "check-polls")
+    count = (int(open(polls, encoding="utf-8").read()) if os.path.exists(polls) else 0) + 1
+    open(polls, "w", encoding="utf-8").write(str(count))
+    late = int(os.environ.get("FAKE_GH_LATE", "0"))
+    print(os.environ.get("FAKE_GH_LISTED", "2") if count > late else "0")
+    sys.exit(0)
 if cmd == ["pr", "checks"]:
     sys.exit(int(os.environ.get("FAKE_GH_CHECKS", "0")))
 if cmd == ["pr", "merge"]:
+    if fails("merge"):
+        sys.exit("Pull request is not mergeable: the base branch policy prohibits the merge.")
     pr = prs[int(args[2]) - 1]
     with tempfile.TemporaryDirectory() as tmp:
         def run(*command):
-            subprocess.run(command, cwd=tmp, check=True, capture_output=True)
+            subprocess.run(command, cwd=tmp, check=True, capture_output=True, timeout=300)
         run("git", "clone", "-q", origin, ".")
         run("git", "checkout", "-q", pr["base"])
         run("git", "merge", "-q", "--no-ff", "origin/" + pr["head"], "-m", opt("--subject"))
@@ -62,10 +101,21 @@ if cmd == ["pr", "merge"]:
     save()
     sys.exit(0)
 if cmd == ["run", "list"]:
-    print(7)
+    print(os.environ.get("FAKE_GH_RUN_ID", "7"))
     sys.exit(0)
-if cmd == ["run", "watch"]:
-    sys.exit(int(os.environ.get("FAKE_GH_RUN", "0")))
+if cmd == ["run", "view"] and "--json" in args:
+    # first query: in progress; then the result of FAKE_GH_RUN (0 = success)
+    views = os.path.join(state, "run-views")
+    count = int(open(views, encoding="utf-8").read()) if os.path.exists(views) else 0
+    open(views, "w", encoding="utf-8").write(str(count + 1))
+    if count == 0:
+        print("in_progress ")
+    else:
+        print("completed " + ("success" if os.environ.get("FAKE_GH_RUN", "0") == "0" else "failure"))
+    sys.exit(0)
+if cmd == ["run", "view"]:
+    print("FAILED tests/test_x.py::test_y - AssertionError")
+    sys.exit(0)
 sys.exit("fake gh: unsupported " + " ".join(args))
 '''
 
@@ -85,7 +135,7 @@ def sh(cwd: Path, env: dict[str, str], *args: str, stdin: str = "",
         The finished process.
     """
     return subprocess.run(list(args), cwd=cwd, env=env, input=stdin, text=True,
-                          capture_output=True, check=check)
+                          capture_output=True, check=check, timeout=TIMEOUT)
 
 
 @pytest.fixture(name="repo")
@@ -113,7 +163,7 @@ def fixture_repo(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     env = dict(os.environ)
     env.update(HOME=str(home), GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.org",
                GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.org",
-               GIT_CONFIG_NOSYSTEM="1", CHECK_CMD="true", RELEASE_WAIT="0",
+               GIT_CONFIG_NOSYSTEM="1", CHECK_CMD="true", RELEASE_WAIT="0", RELEASE_POLL="0", RELEASE_RETRY_PAUSE="0",
                INSTALL_CMD=str(installer), FAKE_GH_DIR=str(state),
                FAKE_GH_ORIGIN=str(origin), PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
     sh(tmp_path, env, "git", "init", "-q", "--bare", "-b", "main", str(origin))
@@ -126,6 +176,7 @@ def fixture_repo(tmp_path: Path) -> tuple[Path, dict[str, str]]:
                                          'version = { attr = "demo_tool.__version__" }\n')
     (work / "tools").mkdir()
     shutil.copy2(TOOLS / "release.sh", work / "tools" / "release.sh")
+    shutil.copy2(TOOLS / "output.sh", work / "tools" / "output.sh")
     shutil.copy2(TOOLS / "same-code.sh", work / "tools" / "same-code.sh")
     (work / ".gitignore").write_text("installed\n")
     for command in (["git", "switch", "-q", "-c", "main"], ["git", "add", "-A"],
@@ -215,7 +266,7 @@ def test_feature_not_merged_without_yes(repo: tuple[Path, dict[str, str]]) -> No
     before = remote(work, env, "refs/heads/develop")
     commit(work, env, "feature/a", "develop", "a.txt")
     done = release(work, env, stdin="n\nn\n")
-    assert "Nicht gepusht" in done.stdout
+    assert "Not pushed" in done.stdout
     assert remote(work, env, "refs/heads/develop") == before
     assert not remote(work, env, "refs/heads/feature/a")
 
@@ -235,7 +286,7 @@ def test_feature_merged_through_pull_request(repo: tuple[Path, dict[str, str]]) 
     sh(work, env, "git", "push", "-q", "origin", "develop")
     sh(work, env, "git", "switch", "-q", "feature/a")
     done = release(work, env, stdin="n\nj\n")
-    assert "in develop gemergt" in done.stdout
+    assert "is merged into develop" in done.stdout
     assert subject(work, env, "origin/develop") == "Merge feature/a into develop"
     assert sh(work, env, "git", "rev-parse", "develop").stdout == \
         sh(work, env, "git", "rev-parse", "origin/develop").stdout
@@ -268,15 +319,15 @@ def test_feature_then_release_and_install(repo: tuple[Path, dict[str, str]]) -> 
     commit(work, env, "feature/a", "develop", "a.txt")
     release(work, env, stdin="n\nj\n")
     commit(work, env, "feature/b", "develop", "b.txt", note="more")
-    done = release(work, env, stdin="j\n\nZwei Features\nj\nj\n")
-    assert "Release: v1.1.0 -> v1.2.0 aus develop - Zwei Features" in done.stdout
-    assert "Bitgleich: JA" in done.stdout
+    done = release(work, env, stdin="j\n\nTwo features\nj\nj\n")
+    assert "Release: v1.1.0 -> v1.2.0 from develop - Two features" in done.stdout
+    assert "Bit-identical: YES" in done.stdout
     assert "demo-tool v1.2.0 installed" in done.stdout
     assert (work / "installed").read_text() == "v1.2.0\n"
     assert remote(work, env, "refs/tags/v1.2.0")
     note = sh(work, env, "git", "tag", "-l", "--format=%(contents:subject)", "v1.2.0").stdout
-    assert note.strip() == "demo-tool 1.2.0: Zwei Features"
-    assert subject(work, env, "origin/main") == "demo-tool 1.2.0: Zwei Features"
+    assert note.strip() == "demo-tool 1.2.0: Two features"
+    assert subject(work, env, "origin/main") == "demo-tool 1.2.0: Two features"
     assert subject(work, env, "origin/develop") == "Merge v1.2.0 into develop"
     for branch in ("release/1.2.0", "merge/v1.2.0", "feature/b"):
         assert not remote(work, env, f"refs/heads/{branch}")
@@ -301,8 +352,8 @@ def test_develop_non_interactive(repo: tuple[Path, dict[str, str]], args: tuple[
     work, env = repo
     commit(work, env, "feature/a", "develop", "a.txt")
     release(work, env, "--merge-only", "--yes")
-    done = release(work, env, *args, "-m", "Neu", "--yes")
-    assert f"-> {expected} aus develop" in done.stdout
+    done = release(work, env, *args, "-m", "New", "--yes")
+    assert f"-> {expected} from develop" in done.stdout
     assert remote(work, env, f"refs/tags/{expected}")
 
 
@@ -315,7 +366,7 @@ def test_feature_with_part_from_update(repo: tuple[Path, dict[str, str]]) -> Non
     work, env = repo
     commit(work, env, "feature/a", "develop", "a.txt")
     done = release(work, env, "minor", "-m", "Sofort", "--yes")
-    assert "-> v1.2.0 aus develop" in done.stdout and "Bitgleich: JA" in done.stdout
+    assert "-> v1.2.0 from develop" in done.stdout and "Bit-identical: YES" in done.stdout
     assert remote(work, env, "refs/tags/v1.2.0")
 
 
@@ -329,8 +380,8 @@ def test_release_declined_keeps_everything_local(repo: tuple[Path, dict[str, str
     commit(work, env, "feature/a", "develop", "a.txt")
     release(work, env, "--merge-only", "--yes")
     sh(work, env, "git", "switch", "-q", "develop")
-    done = release(work, env, "minor", "-m", "Spaeter", stdin="n\n")
-    assert "Nicht gepusht" in done.stdout and "git branch -D release/1.2.0" in done.stdout
+    done = release(work, env, "minor", "-m", "Later", stdin="n\n")
+    assert "Not pushed" in done.stdout and "git branch -D release/1.2.0" in done.stdout
     assert not remote(work, env, "refs/heads/release/1.2.0")
     assert not remote(work, env, "refs/tags/v1.2.0")
 
@@ -345,9 +396,9 @@ def test_hotfix_while_develop_collects(repo: tuple[Path, dict[str, str]]) -> Non
     commit(work, env, "feature/a", "develop", "a.txt", note=None)
     release(work, env, "--merge-only", "--yes")
     commit(work, env, "hotfix/x", "main", "fix.txt", note="fixed")
-    done = release(work, env, "-m", "Dringend", stdin="j\nn\n")
-    assert "-> v1.1.1 aus hotfix/x" in done.stdout
-    assert "develop enthaelt zusaetzlich" in done.stdout
+    done = release(work, env, "-m", "Urgent", stdin="j\nn\n")
+    assert "-> v1.1.1 from hotfix/x" in done.stdout
+    assert "develop also holds the features" in done.stdout
     assert remote(work, env, "refs/tags/v1.1.1")
     for name in ("a.txt", "fix.txt"):
         sh(work, env, "git", "cat-file", "-e", f"origin/develop:{name}")
@@ -364,7 +415,7 @@ def test_hotfix_conflict_with_develop(repo: tuple[Path, dict[str, str]]) -> None
     commit(work, env, "feature/a", "develop", "a.txt", note="feature")
     release(work, env, "--merge-only", "--yes")
     commit(work, env, "hotfix/x", "main", "fix.txt", note="fixed")
-    stopped = release(work, env, "-m", "Dringend", "--yes", check=False)
+    stopped = release(work, env, "-m", "Urgent", "--yes", check=False)
     assert "merging it back into develop has conflicts" in stopped.stderr
     assert remote(work, env, "refs/tags/v1.1.1")
     assert not sh(work, env, "git", "status", "--porcelain").stdout
@@ -495,15 +546,211 @@ def test_rebase_conflict_changes_nothing(repo: tuple[Path, dict[str, str]]) -> N
 
 
 def test_same_code_yes_no(repo: tuple[Path, dict[str, str]]) -> None:
-    """JA for identical trees, NEIN with a file list otherwise, 2 for bad usage.
+    """YES for identical trees, NO with a file list otherwise, 2 for bad usage.
 
     Args:
         repo: Prepared clone (fixture).
     """
     work, env = repo
-    assert "Bitgleich: JA" in sh(work, env, "tools/same-code.sh", "main", "develop").stdout
+    assert "Bit-identical: YES" in sh(work, env, "tools/same-code.sh", "main", "develop").stdout
     commit(work, env, "hotfix/x", "develop", "fix.txt")
     other = sh(work, env, "tools/same-code.sh", "main", "hotfix/x", check=False)
-    assert other.returncode == 1 and "NEIN" in other.stdout and "fix.txt" in other.stdout
+    assert other.returncode == 1 and "NO -" in other.stdout and "fix.txt" in other.stdout
     assert sh(work, env, "tools/same-code.sh", "main", check=False).returncode == 2
     assert sh(work, env, "tools/same-code.sh", "main", "nope", check=False).returncode == 2
+
+
+def test_waits_until_checks_are_registered(repo: tuple[Path, dict[str, str]]) -> None:
+    """The script asks GitHub again until the checks are registered, then merges.
+
+    Args:
+        repo: Prepared clone (fixture).
+    """
+    work, env = repo
+    commit(work, env, "feature/a", "develop", "a.txt")
+    late = env | {"FAKE_GH_LATE": "2", "RELEASE_WAIT": "30"}
+    done = release(work, late, "--merge-only", "--yes")
+    assert "is merged into develop" in done.stdout
+    polls = Path(env["FAKE_GH_DIR"]) / "check-polls"
+    assert polls.read_text(encoding="utf-8") == "3"
+    sh(work, env, "git", "cat-file", "-e", "origin/develop:a.txt")
+
+
+def test_no_checks_registered_merges_nothing(repo: tuple[Path, dict[str, str]]) -> None:
+    """Without registered checks the script stops after RELEASE_WAIT and merges nothing.
+
+    Args:
+        repo: Prepared clone (fixture).
+    """
+    work, env = repo
+    before = remote(work, env, "refs/heads/develop")
+    commit(work, env, "feature/a", "develop", "a.txt")
+    stopped = release(work, env | {"FAKE_GH_LISTED": "0"}, "--merge-only", "--yes",
+                      check=False)
+    assert stopped.returncode == 1
+    assert "registered no checks for pull request #1 within 0 s" in stopped.stderr
+    assert remote(work, env, "refs/heads/develop") == before
+
+
+def test_no_tag_run_is_reported(repo: tuple[Path, dict[str, str]]) -> None:
+    """A tag whose CI run never appears stops before the merge back.
+
+    Args:
+        repo: Prepared clone (fixture).
+    """
+    work, env = repo
+    commit(work, env, "feature/a", "develop", "a.txt")
+    stopped = release(work, env | {"FAKE_GH_RUN_ID": ""}, "minor", "-m", "x", "--yes",
+                      check=False)
+    assert "no CI run appeared for v1.2.0 within 0 s" in stopped.stderr
+    assert remote(work, env, "refs/tags/v1.2.0")
+
+
+def test_time_measurement(repo: tuple[Path, dict[str, str]]) -> None:
+    """Every long step prints its duration; the summary follows a release and a stop.
+
+    Args:
+        repo: Prepared clone (fixture).
+    """
+    work, env = repo
+    commit(work, env, "feature/a", "develop", "a.txt")
+    done = release(work, env, "minor", "-m", "New", "--yes")
+    for step in ("Gates feature/a", "Push feature/a", "Registration of the checks of PR #1",
+                 "Checks of PR #1", "Merge of PR #1", "Gates release/1.2.0",
+                 "Push v1.2.0", "Registration of the release check of v1.2.0",
+                 "Release check of v1.2.0", "Installation v1.2.0"):
+        assert f"] {step}: " in done.stdout, step
+    summary = done.stdout.split("Time measurement release.sh ", 1)[1].split("══ Result", 1)[0]
+    assert "Checks of PR #3" in summary and "Total" in summary.strip().splitlines()[-1]
+    commit(work, env, "feature/b", "develop", "b.txt")
+    stopped = release(work, env | {"FAKE_GH_CHECKS": "1"}, "--merge-only", "--yes",
+                      check=False)
+    assert stopped.returncode == 1
+    assert "Time measurement release.sh" in stopped.stdout and "Checks of PR #4" in stopped.stdout
+    answered = release(work, env, stdin="n\nn\n")
+    assert "] Answer to: Build the release now?: " in answered.stdout
+    assert "══ Time measurement" not in release(work, env, "--help").stdout
+
+
+@pytest.mark.parametrize("anyway", ["", "1"])
+def test_failed_pull_request_creation_is_retried(repo: tuple[Path, dict[str, str]],
+                                                 anyway: str) -> None:
+    """A passing server error of gh pr create is retried; a PR made anyway is reused.
+
+    Args:
+        repo: Prepared clone (fixture).
+        anyway: "1" when GitHub created the pull request despite the error.
+    """
+    work, env = repo
+    commit(work, env, "feature/a", "develop", "a.txt")
+    done = release(work, env | {"FAKE_GH_FAIL_CREATE": "2", "FAKE_GH_CREATED_ANYWAY": anyway},
+                   "--merge-only", "--yes")
+    assert "creating the pull request failed (attempt 1/5)" in done.stderr
+    assert "Pull Request #1:" in done.stdout
+    sh(work, env, "git", "cat-file", "-e", "origin/develop:a.txt")
+
+
+def test_pull_request_never_created_merges_nothing(repo: tuple[Path, dict[str, str]]) -> None:
+    """Five failed attempts stop the script before checks and merge.
+
+    Args:
+        repo: Prepared clone (fixture).
+    """
+    work, env = repo
+    before = remote(work, env, "refs/heads/develop")
+    commit(work, env, "feature/a", "develop", "a.txt")
+    stopped = release(work, env | {"FAKE_GH_FAIL_CREATE": "9"}, "--merge-only", "--yes",
+                      check=False)
+    assert stopped.returncode != 0
+    assert "no pull request for feature/a -> develop - nothing merged" in stopped.stderr
+    assert "Pull Request #:" not in stopped.stdout
+    calls = (Path(env["FAKE_GH_DIR"]) / "calls").read_text()
+    assert "pr checks" not in calls and "pr merge" not in calls
+    assert remote(work, env, "refs/heads/develop") == before
+
+
+def test_refused_merge_is_retried(repo: tuple[Path, dict[str, str]]) -> None:
+    """A merge GitHub refuses right after green checks succeeds on a later attempt.
+
+    Args:
+        repo: Prepared clone (fixture).
+    """
+    work, env = repo
+    commit(work, env, "feature/a", "develop", "a.txt")
+    done = release(work, env | {"FAKE_GH_FAIL_MERGE": "2"}, "--merge-only", "--yes")
+    assert "merging pull request #1 failed (attempt 2/5)" in done.stderr
+    sh(work, env, "git", "cat-file", "-e", "origin/develop:a.txt")
+
+
+def test_merge_refused_for_good_stops(repo: tuple[Path, dict[str, str]]) -> None:
+    """Five refused merges stop the script with a clear message.
+
+    Args:
+        repo: Prepared clone (fixture).
+    """
+    work, env = repo
+    before = remote(work, env, "refs/heads/develop")
+    commit(work, env, "feature/a", "develop", "a.txt")
+    stopped = release(work, env | {"FAKE_GH_FAIL_MERGE": "9"}, "--merge-only", "--yes",
+                      check=False)
+    assert "pull request #1 could not be merged" in stopped.stderr
+    assert remote(work, env, "refs/heads/develop") == before
+
+
+def test_check_watcher_prints_changes(repo: tuple[Path, dict[str, str]]) -> None:
+    """One CI line per change of a check, none while nothing changes.
+
+    Args:
+        repo: Prepared clone (fixture).
+    """
+    work, env = repo
+    commit(work, env, "feature/a", "develop", "a.txt")
+    done = release(work, env | {"FAKE_GH_STATES": "pending,pending,pending,pass"},
+                   "--merge-only", "--yes")
+    lines = [line for line in done.stdout.splitlines() if "gates (3.14)" in line]
+    assert len(lines) == 2 and "pending" in lines[0] and "pass" in lines[1]
+    assert sum("gates (3.12)" in line for line in done.stdout.splitlines()) == 1
+
+
+def test_red_check_shows_failed_log(repo: tuple[Path, dict[str, str]]) -> None:
+    """A red check prints the failed log of its run and merges nothing.
+
+    Args:
+        repo: Prepared clone (fixture).
+    """
+    work, env = repo
+    commit(work, env, "feature/a", "develop", "a.txt")
+    stopped = release(work, env | {"FAKE_GH_STATES": "pending,fail"}, "--merge-only", "--yes",
+                      check=False)
+    assert stopped.returncode == 1
+    assert "failed log of run 41" in stopped.stdout and "AssertionError" in stopped.stdout
+    assert "nothing merged" in stopped.stderr
+
+
+def test_output_library_required(repo: tuple[Path, dict[str, str]]) -> None:
+    """Without tools/output.sh the script stops before it does anything.
+
+    Args:
+        repo: Prepared clone (fixture).
+    """
+    work, env = repo
+    (work / "tools" / "output.sh").unlink()
+    stopped = release(work, env, "--help", check=False)
+    assert stopped.returncode == 2 and "tools/output.sh is missing" in stopped.stderr
+
+
+def test_result_block(repo: tuple[Path, dict[str, str]]) -> None:
+    """A run ends with the result block: DONE after a release, FAILED after a stop.
+
+    Args:
+        repo: Prepared clone (fixture).
+    """
+    work, env = repo
+    commit(work, env, "feature/a", "develop", "a.txt")
+    done = release(work, env, "minor", "-m", "New", "--yes")
+    assert "══ Result" in done.stdout and "DONE  v1.2.0 is published" in done.stdout
+    assert "run 7" in done.stdout and "success" in done.stdout
+    commit(work, env, "feature/b", "develop", "b.txt")
+    stopped = release(work, env | {"FAKE_GH_CHECKS": "1"}, "--merge-only", "--yes", check=False)
+    assert "FAILED" in stopped.stdout and "✘ release.sh:" in stopped.stderr
+    assert "══ Result" not in release(work, env, "--help").stdout
