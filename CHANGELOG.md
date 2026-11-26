@@ -10,11 +10,14 @@ were delivered as single files and imported into the repository afterwards (see
 
 ### Changed
 
-- Development tools follow dev-conventions bundle v18. `tools/check.sh` prints the gates in
+- Development tools follow dev-conventions bundle v19. `tools/check.sh` prints the gates in
   the common console look (numbered stages, one PASS/FAIL/SKIP line each, result block) and
   runs a single gate with `--only <gate>`; `tools/release.sh` (GitHub variant), `tools/same-code.sh`
   and the new `tools/output.sh` come from the bundle, with English dialogs (`[y/N]`), a
-  watcher of the GitHub checks and a time measurement of every step.
+  watcher of the GitHub checks and a time measurement of every step. While it waits for
+  GitHub, `tools/release.sh` shows every answer of `gh` and a progress line per CI job
+  (bar of the finished steps, running step, seconds since the job started); it works with
+  gh 2.45 of Ubuntu 24.04, which has no `gh pr checks --json`.
 - Line length 120 for pycodestyle and pylint (was 100).
 - CI runs one step per gate (`gate: <name>`), so GitHub shows which gate failed; the
   triggers are unchanged (pull requests into `main`/`develop`, release check on tags).

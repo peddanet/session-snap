@@ -62,30 +62,31 @@ if cmd == ["pr", "create"]:
     save()
     print(f"https://example.invalid/pull/{len(prs)}")
     sys.exit(0)
-if cmd == ["pr", "checks"] and opt("--json") in ("name,bucket", "link,bucket"):
-    # FAKE_GH_STATES: bucket per query, comma separated, the last one repeats;
+if cmd == ["pr", "checks"] and "--json" in args:
+    # like gh 2.45 (Ubuntu 24.04): no --json for this command
+    sys.exit("unknown flag: --json\n\nUsage:  gh pr checks [<number> | <url> | <branch>] [flags]")
+if cmd == ["pr", "checks"]:
+    # registration: the first FAKE_GH_LATE answers (all with FAKE_GH_LISTED=0)
+    # have no checks yet; check-polls counts the answers until the first list
+    marker = os.path.join(state, "registered")
+    if not os.path.exists(marker):
+        polls = os.path.join(state, "check-polls")
+        count = (int(open(polls, encoding="utf-8").read()) if os.path.exists(polls) else 0) + 1
+        open(polls, "w", encoding="utf-8").write(str(count))
+        if os.environ.get("FAKE_GH_LISTED") == "0" or count <= int(os.environ.get("FAKE_GH_LATE", "0")):
+            sys.exit("no checks reported on the 'feature/a' branch")
+        open(marker, "w", encoding="utf-8").write("1")
+    # FAKE_GH_STATES: state per query, comma separated, the last one repeats;
     # default from FAKE_GH_CHECKS (1 = fail, else pass)
-    states = os.environ.get("FAKE_GH_STATES") or (
-        "fail" if os.environ.get("FAKE_GH_CHECKS") == "1" else "pass")
-    states = states.split(",")
+    states = (os.environ.get("FAKE_GH_STATES") or (
+        "fail" if os.environ.get("FAKE_GH_CHECKS") == "1" else "pass")).split(",")
     queries = os.path.join(state, "state-queries")
     count = int(open(queries, encoding="utf-8").read()) if os.path.exists(queries) else 0
-    if opt("--json") == "name,bucket":
-        open(queries, "w", encoding="utf-8").write(str(count + 1))
-        bucket = states[min(count, len(states) - 1)]
-        print(f"gates (3.12)\tpass\ngates (3.14)\t{bucket}")
-    elif "fail" in states:
-        print("https://github.com/o/r/actions/runs/41/job/9")
-    sys.exit(0)
-if cmd == ["pr", "checks"] and "--json" in args:
-    polls = os.path.join(state, "check-polls")
-    count = (int(open(polls, encoding="utf-8").read()) if os.path.exists(polls) else 0) + 1
-    open(polls, "w", encoding="utf-8").write(str(count))
-    late = int(os.environ.get("FAKE_GH_LATE", "0"))
-    print(os.environ.get("FAKE_GH_LISTED", "2") if count > late else "0")
-    sys.exit(0)
-if cmd == ["pr", "checks"]:
-    sys.exit(int(os.environ.get("FAKE_GH_CHECKS", "0")))
+    open(queries, "w", encoding="utf-8").write(str(count + 1))
+    bucket = states[min(count, len(states) - 1)]
+    run = "https://github.com/o/r/actions/runs/41/job/"
+    print(f"gates (3.12)\tpass\t2m1s\t{run}8\t\ngates (3.14)\t{bucket}\t2m3s\t{run}9\t")
+    sys.exit({"fail": 1, "pending": 8}.get(bucket, 0))
 if cmd == ["pr", "merge"]:
     if fails("merge"):
         sys.exit("Pull request is not mergeable: the base branch policy prohibits the merge.")
@@ -102,6 +103,21 @@ if cmd == ["pr", "merge"]:
     sys.exit(0)
 if cmd == ["run", "list"]:
     print(os.environ.get("FAKE_GH_RUN_ID", "7"))
+    sys.exit(0)
+if cmd == ["run", "view"] and opt("--json") == "jobs":
+    # first answer: job queued; then the step "gate: tests" runs
+    views = os.path.join(state, "job-views")
+    count = int(open(views, encoding="utf-8").read()) if os.path.exists(views) else 0
+    open(views, "w", encoding="utf-8").write(str(count + 1))
+    names = ["Set up job", "Run actions/setup-python@v6", "gate: privacy", "gate: tests"]
+    if count == 0:
+        job = {"name": "gates (3.14)", "status": "queued", "startedAt": None, "steps": []}
+    else:
+        steps = [{"name": n, "status": "completed", "conclusion": "success"} for n in names[:3]]
+        steps.append({"name": names[3], "status": "in_progress", "conclusion": ""})
+        job = {"name": "gates (3.14)", "status": "in_progress",
+               "startedAt": "2026-11-26T10:00:00Z", "steps": steps}
+    print(json.dumps({"jobs": [{"name": "gates (3.12)", "status": "completed", "steps": []}, job]}))
     sys.exit(0)
 if cmd == ["run", "view"] and "--json" in args:
     # first query: in progress; then the result of FAKE_GH_RUN (0 = success)
@@ -163,7 +179,8 @@ def fixture_repo(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     env = dict(os.environ)
     env.update(HOME=str(home), GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.org",
                GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.org",
-               GIT_CONFIG_NOSYSTEM="1", CHECK_CMD="true", RELEASE_WAIT="0", RELEASE_POLL="0", RELEASE_RETRY_PAUSE="0",
+               GIT_CONFIG_NOSYSTEM="1", NO_COLOR="1", CHECK_CMD="true",
+               RELEASE_WAIT="0", RELEASE_POLL="0", RELEASE_RETRY_PAUSE="0",
                INSTALL_CMD=str(installer), FAKE_GH_DIR=str(state),
                FAKE_GH_ORIGIN=str(origin), PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
     sh(tmp_path, env, "git", "init", "-q", "--bare", "-b", "main", str(origin))
@@ -589,6 +606,7 @@ def test_no_checks_registered_merges_nothing(repo: tuple[Path, dict[str, str]]) 
                       check=False)
     assert stopped.returncode == 1
     assert "registered no checks for pull request #1 within 0 s" in stopped.stderr
+    assert "last answer of gh: no checks reported on the 'feature/a' branch" in stopped.stderr
     assert remote(work, env, "refs/heads/develop") == before
 
 
@@ -707,7 +725,8 @@ def test_check_watcher_prints_changes(repo: tuple[Path, dict[str, str]]) -> None
     commit(work, env, "feature/a", "develop", "a.txt")
     done = release(work, env | {"FAKE_GH_STATES": "pending,pending,pending,pass"},
                    "--merge-only", "--yes")
-    lines = [line for line in done.stdout.splitlines() if "gates (3.14)" in line]
+    lines = [line for line in done.stdout.splitlines()
+             if "gates (3.14)" in line and ("… pending" in line or "✔ pass" in line)]
     assert len(lines) == 2 and "pending" in lines[0] and "pass" in lines[1]
     assert sum("gates (3.12)" in line for line in done.stdout.splitlines()) == 1
 
@@ -754,3 +773,60 @@ def test_result_block(repo: tuple[Path, dict[str, str]]) -> None:
     stopped = release(work, env | {"FAKE_GH_CHECKS": "1"}, "--merge-only", "--yes", check=False)
     assert "FAILED" in stopped.stdout and "✘ release.sh:" in stopped.stderr
     assert "══ Result" not in release(work, env, "--help").stdout
+
+
+def test_registration_wait_is_visible(repo: tuple[Path, dict[str, str]]) -> None:
+    """While GitHub has no checks yet, the answer of gh is shown, never a silent wait.
+
+    Args:
+        repo: Prepared clone (fixture).
+    """
+    work, env = repo
+    commit(work, env, "feature/a", "develop", "a.txt")
+    done = release(work, env | {"FAKE_GH_LATE": "2", "RELEASE_WAIT": "30"}, "--merge-only", "--yes")
+    shown = [line for line in done.stdout.splitlines() if "gh: no checks reported" in line]
+    assert len(shown) == 1 and "PR #1" in shown[0]
+
+
+def test_progress_of_running_jobs(repo: tuple[Path, dict[str, str]]) -> None:
+    """A running check shows a progress line per job: bar, done/total, running step.
+
+    Args:
+        repo: Prepared clone (fixture).
+    """
+    work, env = repo
+    commit(work, env, "feature/a", "develop", "a.txt")
+    done = release(work, env | {"FAKE_GH_STATES": "pending,pending,pending,pass"},
+                   "--merge-only", "--yes")
+    queued = [line for line in done.stdout.splitlines() if "queued for a runner" in line]
+    running = [line for line in done.stdout.splitlines() if "gate: tests" in line]
+    assert len(queued) == 1 and "gates (3.14)" in queued[0] and "0/0" in queued[0]
+    assert len(running) == 1 and "3/4" in running[0] and "█" in running[0] and " s" in running[0]
+    assert not any("gates (3.12)" in line and "/" in line for line in done.stdout.splitlines())
+
+
+def test_heartbeat_repeats_progress(repo: tuple[Path, dict[str, str]]) -> None:
+    """With RELEASE_HEARTBEAT=0 every query prints the progress again (shows a hang).
+
+    Args:
+        repo: Prepared clone (fixture).
+    """
+    work, env = repo
+    commit(work, env, "feature/a", "develop", "a.txt")
+    done = release(work, env | {"FAKE_GH_STATES": "pending,pending,pending,pending,pass",
+                                "RELEASE_HEARTBEAT": "0"}, "--merge-only", "--yes")
+    assert sum("gate: tests" in line for line in done.stdout.splitlines()) >= 2
+
+
+def test_pr_checks_without_json(repo: tuple[Path, dict[str, str]]) -> None:
+    """The script never asks "gh pr checks --json" (missing in gh 2.45 of Ubuntu 24.04).
+
+    Args:
+        repo: Prepared clone (fixture).
+    """
+    work, env = repo
+    commit(work, env, "feature/a", "develop", "a.txt")
+    release(work, env | {"FAKE_GH_STATES": "pending,fail"}, "--merge-only", "--yes", check=False)
+    calls = (Path(env["FAKE_GH_DIR"]) / "calls").read_text(encoding="utf-8").splitlines()
+    assert any(call.startswith("pr checks") for call in calls)
+    assert not any(call.startswith("pr checks") and "--json" in call for call in calls)

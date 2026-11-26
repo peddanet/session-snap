@@ -78,9 +78,23 @@
 # after a stop, lists all steps with their duration and the total
 # ("Time measurement release.sh").
 #
-# Watching the checks: one line per change of a check (time, check, state),
-# a heartbeat line at most every 2 minutes while nothing changes, and the
-# failed log of a red check (gh run view --log-failed, last 40 lines).
+# Waiting for the registration shows every new answer of gh (e.g. "no checks
+# reported on the ... branch") and a line every RELEASE_HEARTBEAT seconds
+# (default 30) with the time waited so far, so a silent wait cannot happen.
+#
+# Watching the checks: one line per change of a check (time, check, state);
+# while a check runs, a progress line per job whenever its step changes:
+# bar of the finished steps, "done/total", the running step (e.g. "Run
+# actions/setup-python@v6", "gate: tests") and the seconds since the job
+# started. While nothing changes, every RELEASE_HEARTBEAT seconds the
+# progress lines of the running jobs are printed again with the new time,
+# so a hanging step shows. A red check prints its failed log (gh run view
+# --log-failed, last 40 lines). The CI run of a tag is watched the same way.
+#
+# gh versions: the script uses only "gh pr checks" without --json (its
+# tab-separated output; Ubuntu 24.04 ships gh 2.45, which has no --json for
+# this command) and "gh run view/list --json" (in gh since 2.x); job
+# details are read with python3.
 #
 # Output: tools/output.sh (copied from tools/ of the dev-conventions
 # bundle) must lie next to this script; it gives every
@@ -104,6 +118,7 @@ INSTALL_CMD="${INSTALL_CMD:-./install.sh}"
 WAIT="${RELEASE_WAIT:-600}"
 POLL="${RELEASE_POLL:-5}"
 RETRY_PAUSE="${RELEASE_RETRY_PAUSE:-10}"
+HEARTBEAT="${RELEASE_HEARTBEAT:-30}"
 
 die() { printf '%s✘ release.sh: %s%s\n' "$R$B" "$*" "$X" >&2; exit 1; }
 tree() { git rev-parse "$1^{tree}"; }
@@ -235,74 +250,180 @@ merge_pull_request() {
     die "pull request #$1 could not be merged - see GitHub; nothing else changed"
 }
 
-# checks_registered PR - succeeds once GitHub lists at least one check for
-# pull request $1 (gh fails or prints nothing while there is none)
-checks_registered() {
-    local count
-    count="$(gh pr checks "$1" --json name --jq length 2>/dev/null)" || count=0
-    [[ "$count" =~ ^[0-9]+$ ]] || count=0
-    ((count > 0))
+# pr_checks PR - ask GitHub for the checks of pull request $1. PR_LINES gets
+# one line "name<TAB>state<TAB>elapsed<TAB>link" per check (state: pass, fail,
+# pending, skipping, cancel), as gh prints them without a terminal; this form
+# exists in every gh version, --json does not (gh 2.45 of Ubuntu 24.04).
+# gh exits 1 (a check failed) or 8 (pending) although it answered, so its
+# exit status is not used. Without check lines CHECKS_ERROR keeps the first
+# line of what gh said (e.g. "no checks reported on the 'feature/x' branch").
+PR_LINES="" CHECKS_ERROR="" PROGRESS_SHOWN=0
+declare -A STEP_AT=() FIRST_SEEN=()
+pr_checks() {
+    local out
+    out="$(gh pr checks "$1" 2>&1 </dev/null)" || true
+    PR_LINES="$(printf '%s\n' "$out" \
+        | awk -F'\t' 'NF >= 4 && $2 ~ /^(pass|fail|pending|skipping|cancel)$/')" || true
+    CHECKS_ERROR=""
+    [[ -n "$PR_LINES" ]] || CHECKS_ERROR="$(printf '%s\n' "$out" | sed -n '/[^[:space:]]/{p;q}')"
 }
 
-# check_states PR - one line "name<TAB>bucket" per check of pull request $1
-# (bucket: pass, fail, pending, skipping, cancel)
-check_states() {
-    gh pr checks "$1" --json name,bucket --jq '.[] | [.name, .bucket] | @tsv'
+# run_ids - the CI runs named in the links of PR_LINES whose check is pending
+run_ids() {
+    printf '%s\n' "$PR_LINES" | awk -F'\t' '$2 == "pending" { print $4 }' \
+        | sed -n 's|.*/actions/runs/\([0-9][0-9]*\).*|\1|p' | sort -u
 }
 
-# failed_log PR - last 40 lines of the failed log of the red checks of PR $1
+# job_progress RUN - one line per job of CI run $1:
+# "name<TAB>finished steps<TAB>all steps<TAB>running step<TAB>seconds since start<TAB>status"
+# (an unknown value is "-", because read with IFS=tab skips empty fields)
+job_progress() {
+    gh run view "$1" --json jobs 2>/dev/null </dev/null | python3 -c '
+import datetime, json, sys
+try:
+    jobs = json.load(sys.stdin).get("jobs") or []
+except ValueError:
+    jobs = []
+now = datetime.datetime.now(datetime.timezone.utc)
+for job in jobs:
+    steps = job.get("steps") or []
+    done = sum(1 for s in steps if s.get("status") == "completed")
+    step = next((s.get("name", "") for s in steps if s.get("status") == "in_progress"), "")
+    if not step:
+        step = "queued for a runner" if job.get("status") in ("queued", "waiting", "pending") \
+            else next((s.get("name", "") for s in steps if s.get("status") != "completed"), "")
+    seconds = "-"  # never an empty field: read with IFS=tab would skip it
+    started = job.get("startedAt") or ""
+    if started and not started.startswith("0001"):
+        begin = datetime.datetime.fromisoformat(started.replace("Z", "+00:00"))
+        seconds = str(max(0, int((now - begin).total_seconds())))
+    print("\t".join([job.get("name") or "-", str(done), str(len(steps)), step or "-", seconds,
+                     job.get("status") or "-"]))
+' 2>/dev/null || true
+}
+
+# progress JOB DONE TOTAL STEP SECONDS - one CI line: bar of the finished
+# steps, done/total, the running step and the seconds since the job started
+progress() {
+    local width=12 filled=0 full="" empty="" i
+    (($3 > 0)) && filled=$(($2 * width / $3))
+    for ((i = 0; i < filled; i++)); do full+="█"; done
+    for ((i = filled; i < width; i++)); do empty+="░"; done
+    local since=""
+    [[ "$5" == "-" ]] || since="  ${D}$5 s$X"
+    ci "$(date +%T)" "$1" "$4" "$G$full$D$empty$X $2/$3$since"
+}
+
+# show_progress FORCE RUN... - a progress line for every job of the runs
+# whose step changed; FORCE=1 prints every job that has not finished (the
+# heartbeat). PROGRESS_SHOWN=1 when a line was printed.
+show_progress() {
+    local force=$1 run name finished total step seconds status
+    shift
+    PROGRESS_SHOWN=0
+    for run in "$@"; do
+        while IFS=$'\t' read -r name finished total step seconds status; do
+            [[ -n "$name" && "$status" != completed ]] || continue
+            # gh without a start time of the job: count from the first sight of the running job
+            if [[ "$seconds" == "-" && "$step" != "queued for a runner" ]]; then
+                FIRST_SEEN[$name]="${FIRST_SEEN[$name]:-$SECONDS}"
+                seconds=$((SECONDS - FIRST_SEEN[$name]))
+            fi
+            if [[ "$force" == 1 || "${STEP_AT[$name]:-}" != "$finished/$total $step" ]]; then
+                STEP_AT[$name]="$finished/$total $step"
+                progress "$name" "$finished" "$total" "$step" "$seconds"
+                PROGRESS_SHOWN=1
+            fi
+        done < <(job_progress "$run")
+    done
+}
+
+# wait_registered PR - wait until GitHub lists checks for pull request $1,
+# at most WAIT s; every new answer of gh is shown, and a line every
+# HEARTBEAT s with the time waited so far
+wait_registered() {
+    local begin=$SECONDS last=$SECONDS shown="-"
+    while true; do
+        pr_checks "$1"
+        [[ -z "$PR_LINES" ]] || return 0
+        if [[ "$CHECKS_ERROR" != "$shown" ]]; then
+            shown="$CHECKS_ERROR" last=$SECONDS
+            ci "$(date +%T)" "PR #$1" "" "${D}… gh: ${CHECKS_ERROR:-no answer}${X}"
+        elif ((SECONDS - last >= HEARTBEAT)); then
+            ci "$(date +%T)" "PR #$1" "" "${D}… still waiting, $((SECONDS - begin)) s of at most $WAIT s${X}"
+            last=$SECONDS
+        fi
+        ((SECONDS - begin < WAIT)) || return 1
+        sleep "$POLL"
+    done
+}
+
+# failed_log - last 40 lines of the failed log of every red check in PR_LINES
 failed_log() {
     local id
-    for id in $(gh pr checks "$1" --json link,bucket \
-            --jq '.[] | select(.bucket == "fail") | .link' 2>/dev/null \
-            | sed -n 's|.*/actions/runs/\([0-9]*\).*|\1|p' | sort -u); do
+    for id in $(printf '%s\n' "$PR_LINES" | awk -F'\t' '$2 == "fail" { print $4 }' \
+            | sed -n 's|.*/actions/runs/\([0-9][0-9]*\).*|\1|p' | sort -u); do
         note "failed log of run $id (last 40 lines):"
-        gh run view "$id" --log-failed 2>/dev/null | tail -n 40 | while IFS= read -r line; do
+        gh run view "$id" --log-failed 2>/dev/null </dev/null | tail -n 40 | while IFS= read -r line; do
             detail "$line"
         done || true
     done
 }
 
 # watch_checks PR - follow the checks of pull request $1 until all finished:
-# one line per change, a heartbeat at most every 2 minutes, at most five
-# failed queries in a row; succeeds when no check failed
+# one line per change of a check, progress lines of the running jobs (see
+# the header), at most five answers in a row without checks; succeeds when
+# no check failed
 watch_checks() {
-    local states name bucket errors=0 last=$SECONDS pending failed
+    local name state elapsed link errors=0 last=$SECONDS begin=$SECONDS pending failed force
+    local -a runs=()
     local -A seen=()
     while true; do
-        if ! states="$(check_states "$1" 2>/dev/null)"; then
+        pr_checks "$1"
+        if [[ -z "$PR_LINES" ]]; then
             errors=$((errors + 1))
-            ((errors < 5)) || { fail "checks of PR #$1" "GitHub did not answer 5 times"; return 2; }
+            if ((errors >= 5)); then
+                fail "checks of PR #$1" "no checks in 5 answers"
+                detail "gh: ${CHECKS_ERROR:-no answer}"
+                return 2
+            fi
             sleep "$INTERVAL"
             continue
         fi
         errors=0 pending=0 failed=0
-        while IFS=$'\t' read -r name bucket; do
-            [[ -n "$name" ]] || continue
-            if [[ "${seen[$name]:-}" != "$bucket" ]]; then
-                seen[$name]="$bucket"
+        while IFS=$'\t' read -r name state elapsed link; do
+            : "$elapsed" "$link"
+            if [[ "${seen[$name]:-}" != "$state" ]]; then
+                seen[$name]="$state"
                 last=$SECONDS
-                case "$bucket" in
+                case "$state" in
                     pass)     ci "$(date +%T)" "$name" "" "${G}✔ pass${X}" ;;
                     fail)     ci "$(date +%T)" "$name" "" "${R}✘ fail${X}" ;;
                     cancel)   ci "$(date +%T)" "$name" "" "${R}✘ cancelled${X}" ;;
                     skipping) ci "$(date +%T)" "$name" "" "${Y}– skipped${X}" ;;
-                    *)        ci "$(date +%T)" "$name" "" "${D}… $bucket${X}" ;;
+                    *)        ci "$(date +%T)" "$name" "" "${D}… $state${X}" ;;
                 esac
             fi
-            case "$bucket" in
+            case "$state" in
                 pass|skipping) ;;
                 fail|cancel) failed=$((failed + 1)) ;;
                 *) pending=$((pending + 1)) ;;
             esac
-        done <<< "$states"
+        done <<< "$PR_LINES"
         if ((pending == 0)); then
             ((failed == 0)) && return 0
-            failed_log "$1"
+            failed_log
             return 1
         fi
-        if ((SECONDS - last >= 120)); then
-            ci "$(date +%T)" "…" "" "${D}still running ($pending pending)${X}"
+        force=0
+        ((SECONDS - last >= HEARTBEAT)) && force=1
+        mapfile -t runs < <(run_ids)
+        PROGRESS_SHOWN=0
+        ((${#runs[@]} == 0)) || show_progress "$force" "${runs[@]}"
+        if ((PROGRESS_SHOWN)); then
+            last=$SECONDS
+        elif ((force)); then
+            ci "$(date +%T)" "…" "" "${D}still running ($pending pending, $((SECONDS - begin)) s)${X}"
             last=$SECONDS
         fi
         sleep "$INTERVAL"
@@ -314,8 +435,8 @@ watch_checks() {
 checks() {
     local begin code=0
     info "Checks of PR #$1 ..."
-    timed "Registration of the checks of PR #$1" poll checks_registered "$1" \
-        || die "GitHub registered no checks for pull request #$1 within $WAIT s - nothing merged; look at the pull request on GitHub"
+    timed "Registration of the checks of PR #$1" wait_registered "$1" \
+        || die "GitHub registered no checks for pull request #$1 within $WAIT s (last answer of gh: ${CHECKS_ERROR:-none}) - nothing merged; look at the pull request on GitHub"
     begin=$SECONDS
     watch_checks "$1" || code=$?
     record "Checks of PR #$1" $((SECONDS - begin))
@@ -349,9 +470,10 @@ tag_run() {
 tag_registered() { [[ -n "$(tag_run "$1" 2>/dev/null)" ]]; }
 
 # watch_run ID - follow CI run $1 until it ends: one line per change of its
-# status, a heartbeat at most every 2 minutes, the failed log when it failed
+# status, progress lines of its jobs (see the header), the failed log when
+# it failed
 watch_run() {
-    local state previous="" errors=0 last=$SECONDS
+    local state previous="" errors=0 last=$SECONDS begin=$SECONDS force
     while true; do
         if ! state="$(gh run view "$1" --json status,conclusion --jq '.status + " " + .conclusion' 2>/dev/null)"; then
             errors=$((errors + 1))
@@ -377,8 +499,13 @@ watch_run() {
                 done || true
                 return 1 ;;
         esac
-        if ((SECONDS - last >= 120)); then
-            ci "$(date +%T)" "…" "" "${D}still running${X}"
+        force=0
+        ((SECONDS - last >= HEARTBEAT)) && force=1
+        show_progress "$force" "$1"
+        if ((PROGRESS_SHOWN)); then
+            last=$SECONDS
+        elif ((force)); then
+            ci "$(date +%T)" "…" "" "${D}still running ($((SECONDS - begin)) s)${X}"
             last=$SECONDS
         fi
         sleep "$INTERVAL"

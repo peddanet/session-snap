@@ -94,7 +94,7 @@ def environment(setup: dict[str, Path]) -> dict[str, str]:
         Environment variables.
     """
     env = dict(os.environ, HOME=str(setup["home"]), APPLY_RELEASE_ALLOW_ROOT="1",
-               SESSION_SNAP_VERSION="1.2.5", CHECK_CMD="true", RELEASE_WAIT="0",
+               SESSION_SNAP_VERSION="1.2.5", CHECK_CMD="true", RELEASE_WAIT="0", NO_COLOR="1",
                FAKE_GH_DIR=str(setup["gh"]), FAKE_GH_ORIGIN=str(setup["origin"]),
                GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
                GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid",
