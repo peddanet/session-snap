@@ -8,6 +8,8 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+## [2.1.4] - 2026-11-26
+
 ### Changed
 
 - Development tools follow dev-conventions bundle v19. `tools/check.sh` prints the gates in
