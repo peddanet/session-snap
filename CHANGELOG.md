@@ -8,6 +8,8 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-27
+
 ### Added
 
 - `kill`: single image windows are closed through COSMIC (request `close` of
