@@ -92,6 +92,18 @@ scan also reads commit messages and tags, which change without the tree - and th
 that the other gates were skipped. `CHECK_FULL=1 tools/check.sh` forces a full run; CI always
 runs in full.
 
+**Parallel tests.** The gate `tests` runs pytest with pytest-xdist (`-n <workers> --dist
+loadscope`). In a terminal `check.sh` asks `N of M threads free (load L) - run the tests on N
+workers? [Y/n]` (free = threads minus the rounded load of the last minute); the pre-push hook
+and `--yes` take the free threads without asking, CI uses all threads of the runner.
+`CHECK_WORKERS=N` fixes the number, `CHECK_WORKERS=0` runs the tests one after another.
+
+**Bundle tests.** `tools/bundle.sha256` lists the files copied unchanged from the
+dev-conventions bundle with their SHA-256 (`sha256sum -c tools/bundle.sha256` checks them).
+While all match, `tools/bundle_tests.py` skips their tests (`tests/test_release_tools.py`,
+`tests/test_review.py`), which the bundle repository runs at its tag; any change to one of
+the files runs them again, `CHECK_BUNDLE_TESTS=1` always.
+
 ## Privacy
 
 This repository is public. It must never contain real snapshots, logs, configuration, user

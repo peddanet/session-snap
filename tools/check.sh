@@ -1,11 +1,20 @@
 #!/usr/bin/env bash
 # check.sh - the quality gates of session-snap (from templates/check.sh of the dev-conventions bundle).
 #
-# Usage:  tools/check.sh [--fast] [--only GATE]
+# Usage:  tools/check.sh [--fast] [--only GATE] [--yes]
 #
 #   --fast       skip the gate "tests" (quick checks while editing)
 #   --only GATE  run one gate only (CI: one step per gate)
+#   --yes        no question: the tests take the free threads
 #   -h, --help   this text
+#
+# Parallel tests (pytest-xdist, a dev dependency): in a terminal check.sh
+# asks "N of M threads free (load L) - run the tests on N workers? [Y/n]";
+# free = threads minus the load of the last minute (rounded), at least 1.
+# Without a terminal (pre-push hook) or with --yes it takes the free threads
+# without asking; in CI (CI=true) all threads of the runner. CHECK_WORKERS=N
+# fixes the number, CHECK_WORKERS=0 or 1 runs them one after another.
+# Without pytest-xdist the tests run one after another, with a note.
 #
 # Gates, in this order: privacy, shell, format, lint, types, security, tests.
 # The same script runs locally, in the pre-push hook and in CI, so a green
@@ -63,10 +72,14 @@ declare -A ABOUT=(
 
 FAST=false
 ONLY=""
+YES=false
+XDIST=()
+WORKERS=1
 while (($#)); do
     case "$1" in
         --fast) FAST=true ;;
         --only) ONLY="${2:-}"; shift ;;
+        --yes|-y) YES=true ;;
         -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         *) echo "check.sh: unknown argument $1" >&2; exit 2 ;;
     esac
@@ -122,6 +135,34 @@ shell_scripts() {
     shellcheck "${files[@]}"
     echo "${#files[@]} scripts, no finding"
 }
+# workers - number of pytest workers (sets WORKERS; 1 = one after another)
+workers() {
+    local threads load free answer=""
+    threads="$(nproc)"
+    if [[ -n "${CHECK_WORKERS:-}" ]]; then
+        [[ "$CHECK_WORKERS" =~ ^[0-9]+$ ]] || { note "CHECK_WORKERS=$CHECK_WORKERS is no number - one worker"; CHECK_WORKERS=1; }
+        WORKERS=$((CHECK_WORKERS > 1 ? CHECK_WORKERS : 1))
+        detail "tests: $WORKERS worker(s), set by CHECK_WORKERS"
+    elif [[ -n "${CI:-}" ]]; then
+        WORKERS=$threads
+        detail "tests: $WORKERS workers (all threads of the CI runner)"
+    else
+        load="$(cut -d ' ' -f 1 /proc/loadavg)"
+        free="$(awk -v t="$threads" -v l="$load" 'BEGIN { f = t - int(l + 0.5); print (f < 1 ? 1 : f) }')"
+        WORKERS=$free
+        if ! $YES && [[ -t 0 && -t 1 ]] && ((free > 1)); then
+            attention "$free of $threads threads free - run the tests on $free workers?"
+            read -r -p "  $free of $threads threads free (load $load) - run the tests on $free workers? [Y/n] " answer \
+                || answer=n
+            [[ ! "$answer" =~ ^[nN]$ ]] || WORKERS=1
+        fi
+        detail "tests: $WORKERS worker(s) - $free of $threads threads free (load $load)"
+    fi
+    if ((WORKERS > 1)) && ! python3 -c 'import xdist' 2>/dev/null; then
+        note "pytest-xdist is not installed - the tests run one after another (.venv/bin/pip install -e '.[dev]')"
+        WORKERS=1
+    fi
+}
 run_gate() {
     case "$1" in
         privacy)  python3 tools/privacy_scan.py ;;
@@ -130,7 +171,7 @@ run_gate() {
         lint)     pylint --fail-under=10 src tests tools examples ;;
         types)    mypy ;;
         security) bandit -q -c pyproject.toml -r src && echo "no finding" ;;
-        tests)    python3 -m pytest -q -p no:cacheprovider --cov=session_snap --cov-report=term ;;
+        tests)    python3 -m pytest -q -p no:cacheprovider --cov=session_snap --cov-report=term "${XDIST[@]}" ;;
     esac
 }
 
@@ -154,6 +195,12 @@ for gate in "${selected[@]}"; do
         skip "tests" "--fast"
         skipped=$((skipped + 1))
         continue
+    fi
+    if [[ "$gate" == tests ]]; then
+        workers
+        XDIST=()
+        # loadscope: the tests of one class (or module) stay on one worker
+        ((WORKERS == 1)) || XDIST=(-n "$WORKERS" --dist loadscope)
     fi
     begin=$SECONDS code=0
     if [[ "$gate" == tests ]]; then
