@@ -8,6 +8,29 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-11-28
+
+### Changed
+
+- Development tools of dev-conventions bundle v21: `tools/release.sh` lets GitHub check the
+  release commit once and pushes exactly that commit to `main`, `develop` and the tag (one
+  CI run per release instead of three; with a rule that wants pull requests it merges them
+  as before, and it publishes nothing when somebody else pushed meanwhile); questions ring
+  the terminal bell and raise a desktop notice; the progress bar names the running module.
+- `tools/check.sh` runs the tests on the free threads with pytest-xdist (asks in a terminal,
+  all threads in CI, `CHECK_WORKERS`); `pytest-xdist` is a new dev dependency.
+- The tests of the files copied unchanged from the bundle (`tests/test_release_tools.py`,
+  `tests/test_review.py`) are skipped while `tools/bundle.sha256` still matches
+  (`tools/bundle_tests.py`; `CHECK_BUNDLE_TESTS=1` runs them).
+
+### Fixed
+
+- T56 waited a fixed second for the legend of the kill checklist and failed under load or in
+  parallel; it now waits for the text with a time limit and ignores `LINES`/`COLUMNS` of the
+  environment, which curses prefers to the size of the test terminal.
+- T110 failed when an earlier test in the same process had left a capture warning: the
+  warning is now reset for the test.
+
 ## [2.2.0] - 2026-11-27
 
 ### Added
