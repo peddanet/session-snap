@@ -73,7 +73,7 @@ def fixture_setup(tmp_path: Path) -> dict[str, Path]:
     (repo / "pyproject.toml").write_text('[project]\nname = "session-snap"\n'
                                          'version = { attr = "session_snap.__version__" }\n')
     (repo / "tools").mkdir()
-    for name in ("release.sh", "same-code.sh"):
+    for name in ("release.sh", "same-code.sh", "output.sh"):
         shutil.copy2(ROOT / "tools" / name, repo / "tools" / name)
     (repo / "install.sh").write_text(FAKE_INSTALL)
     (repo / "install.sh").chmod(0o755)
@@ -94,7 +94,7 @@ def environment(setup: dict[str, Path]) -> dict[str, str]:
         Environment variables.
     """
     env = dict(os.environ, HOME=str(setup["home"]), APPLY_RELEASE_ALLOW_ROOT="1",
-               SESSION_SNAP_VERSION="1.2.5", CHECK_CMD="true", RELEASE_WAIT="0",
+               SESSION_SNAP_VERSION="1.2.5", CHECK_CMD="true", RELEASE_WAIT="0", NO_COLOR="1",
                FAKE_GH_DIR=str(setup["gh"]), FAKE_GH_ORIGIN=str(setup["origin"]),
                GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
                GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid",
@@ -216,7 +216,7 @@ def test_feature_archive_is_released_without_questions(setup: dict[str, Path]) -
     """
     path = archive(setup, "x", "patch")
     out = run(setup, "-y").stdout
-    assert "-> v1.2.6 aus develop - x done" in out and "applied: feature/x" in out
+    assert "-> v1.2.6 from develop - x done" in out and "applied: feature/x" in out
     assert "refs/tags/v1.2.6" in remote_tags(setup)
     assert not path.exists()
     assert (setup["home"] / ".local/share/session-snap/releases" / path.name).is_file()
