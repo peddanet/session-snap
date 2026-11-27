@@ -441,10 +441,15 @@ def read_stat(pid: int) -> tuple[str, int, int] | None:
 def scan_processes() -> dict:
     """All processes of the current user except this one: {pid: Proc}.
 
+    SESSION_SNAP_ONLY_PATH (set by the test suite) restricts the scan to programs whose
+    path starts with that prefix, so that programs of a running desktop - e.g. an image
+    viewer the user has open - never mix into a test.
+
     Returns:
         Mapping of process ID to Proc.
     """
     uid, me = os.getuid(), os.getpid()
+    only = os.environ.get("SESSION_SNAP_ONLY_PATH", "").encode()
     procs = {}
     for d in os.listdir("/proc"):
         if not d.isdigit():
@@ -462,6 +467,8 @@ def scan_processes() -> dict:
             continue  # process vanished or not accessible
         if not raw:
             continue  # kernel thread / zombie
+        if only and not raw.startswith(only):
+            continue  # test run: not one of the test's own programs
         st = read_stat(pid)
         if st is None:
             continue
@@ -4695,6 +4702,180 @@ def collateral(targets: list, current: list) -> list:
     return out
 
 
+def split_images(targets: list) -> list:
+    """One kill target per image: a viewer process that shows several images is offered
+    image by image, so menus and the checklist count images, not processes.
+
+    Args:
+        targets: Kill targets, one per process (kill_targets).
+
+    Returns:
+        The targets with every image process split into one target per image.
+    """
+    out = []
+    for t in targets:
+        if t["category"] != CAT_IMG or len(t.get("entries", [])) < 2:
+            out.append(t)
+            continue
+        for e in t["entries"]:
+            out.append(dict(t, files=list(e["files"]), entries=[e]))
+    return out
+
+
+def plan_images(targets: list, current: list) -> tuple[list, list]:
+    """Decide how the chosen images end: a viewer process whose open images are all chosen
+    is terminated as a whole; one that also shows images that were not chosen (or are not
+    in the snapshot) keeps running, and only the windows of the chosen images are closed.
+
+    Args:
+        targets: Chosen kill targets (split per image or one per process).
+        current: All entries recorded right now.
+
+    Returns:
+        (process targets, window targets): window targets are one per process with the
+        chosen image entries in ``entries``.
+    """
+    procs: list = []
+    groups: dict = {}
+    for t in targets:
+        if t["category"] == CAT_IMG:
+            groups.setdefault(t["pid"], []).append(t)
+        else:
+            procs.append(t)
+    windows: list = []
+    for pid, ts in groups.items():
+        entries = [e for t in ts for e in t.get("entries", [])]
+        chosen = {signature(e) for e in entries}
+        merged = dict(ts[0], files=_uniq([f for e in entries for f in e["files"]]),
+                      entries=entries)
+        rest = [e for e in current if e["pid"] == pid and e["category"] == CAT_IMG
+                and signature(e) not in chosen]
+        (windows if rest else procs).append(merged)
+    return procs, windows
+
+
+# zcosmic_toplevel_manager_v1: request close(toplevel) = 1, capability close = 1
+REQ_CLOSE, CAP_CLOSE = 1, 1
+
+
+def window_close_available() -> bool:
+    """True if the compositor (COSMIC) lets this client close single windows.
+
+    Returns:
+        True if zcosmic_toplevel_manager_v1 offers the close capability.
+    """
+    try:
+        wl = _Wl(timeout=2.0)
+    except (WaylandError, OSError):
+        return False
+    try:
+        wl.roundtrip()
+        if WL_INFO not in wl.globals or WL_MANAGER not in wl.globals:
+            return False
+        wl.bind(WL_MANAGER, 1)
+        wl.roundtrip()
+        return CAP_CLOSE in wl.caps
+    except (WaylandError, OSError):
+        return False
+    finally:
+        wl.close()
+
+
+def _image_window(handles: dict, e: dict, used: set) -> int | None:
+    """Handle of the open window that shows the image of entry `e`, or None.
+
+    Args:
+        handles: Window handles of the connection.
+        e: Image entry.
+        used: Handles already taken by other entries.
+
+    Returns:
+        The window handle, or None.
+    """
+    base = os.path.basename(e["files"][0]) if e["files"] else ""
+    if not base:
+        return None
+    names = window_names(e)
+    for h, v in handles.items():
+        if h in used or v["closed"] or not v["done"]:
+            continue
+        if app_matches(v["app_id"], names) and base in title_candidates(v["title"]):
+            return h
+    return None
+
+
+def close_image_windows(targets: list, timeout: float, dry_run: bool = False) -> int:
+    """Close the windows of single images through the compositor (COSMIC request close);
+    the viewer process keeps running with its other images.
+
+    Args:
+        targets: Window targets of plan_images (chosen image entries per process).
+        timeout: Seconds to wait until the windows are gone.
+        dry_run: Only print which windows would be closed.
+
+    Returns:
+        0 if every window closed, 1 otherwise.
+    """
+    def name(e: dict) -> str:
+        """File name of the image (program name if none).
+
+        Args:
+            e: Image entry.
+
+        Returns:
+            The name shown in the report.
+        """
+        return os.path.basename(e["files"][0]) if e["files"] else e["program"]
+    if dry_run:
+        for t in targets:
+            for e in t["entries"]:
+                print(f"DRY-RUN  close window  {t['program']} (PID {t['pid']}): {name(e)}")
+        return 0
+    try:
+        wl = _Wl()
+    except (WaylandError, OSError) as exc:
+        print(f"Closing image windows failed: {exc}")
+        return 1
+    asked, missing = [], []
+    try:
+        wl.roundtrip()
+        wl.bind(WL_INFO, 1)
+        manager = wl.bind(WL_MANAGER, 1)
+        wl.roundtrip()
+        wl.roundtrip()
+        used: set = set()
+        for t in targets:
+            for e in t["entries"]:
+                h = _image_window(wl.handles, e, used)
+                if h is None:
+                    missing.append((t, e))
+                    continue
+                used.add(h)
+                wl.send(manager, REQ_CLOSE, ("u", h))
+                asked.append((t, e, h))
+        wl.roundtrip()
+        end = time.monotonic() + timeout
+        while time.monotonic() < end and not all(wl.handles[h]["closed"] for *_x, h in asked):
+            wl.wait(0.2)
+        closed = [(t, e) for t, e, h in asked if wl.handles[h]["closed"]]
+        still = [(t, e) for t, e, h in asked if not wl.handles[h]["closed"]]
+    except (WaylandError, OSError) as exc:
+        print(f"Closing image windows failed: {exc}")
+        return 1
+    finally:
+        wl.close()
+    for t, e in closed:
+        print(f"  window closed       {t['program']} (PID {t['pid']}): {name(e)}")
+    for t, e in still:
+        print(f"  window still open   {t['program']} (PID {t['pid']}): {name(e)}")
+    for t, e in missing:
+        print(f"  no window found     {t['program']} (PID {t['pid']}): {name(e)}")
+    log.info("kill: %d image windows closed, %d still open, %d without window",
+             len(closed), len(still), len(missing))
+    print(f"Image windows: {len(closed)} closed, {len(still) + len(missing)} not closed")
+    return 0 if not still and not missing else 1
+
+
 def browser_targets(targets: list, chosen_cats: set) -> list:
     """Return the targets that are browsers although no browser category was chosen.
 
@@ -4736,6 +4917,11 @@ def cmd_kill(cfg: dict, spec: str | None, kill_all: bool, force: bool, timeout: 
              dry_run: bool, relaunch: bool = True) -> int:
     """Command 'kill': terminate the recorded programs that still run.
 
+    Images are offered one by one. A viewer process whose open images are all chosen is
+    terminated; one that also shows other images keeps running and only the windows of the
+    chosen images are closed through COSMIC (request close) - without COSMIC window control
+    the viewer ends as a whole and the side effects name the other images.
+
     The selection is compared with what is open now: if more entries of the chosen
     categories are open than the snapshot holds, the user decides whether to save a new
     snapshot first and terminate all of them. Before anything is signalled, windows that
@@ -4770,9 +4956,15 @@ def cmd_kill(cfg: dict, spec: str | None, kill_all: bool, force: bool, timeout: 
     interactive = sys.stdin.isatty() and not kill_all
     if not kill_all:
         apps = _uniq([nm for t in targets for nm, _ in t.get("relaunch", [])])
+        n_procs = len(targets)
+        targets = split_images(targets)
         info = [_snap_info(path, data),
-                f"Laufende Programme aus diesem Snapshot: {len(targets)}",
+                f"Laufende Programme aus diesem Snapshot: {n_procs}",
                 "Beenden erfolgt mit SIGTERM (Programme duerfen sauber schliessen)."]
+        imgs = [t for t in targets if t["category"] == CAT_IMG]
+        if imgs:
+            info.append(f"Images are listed one by one: {len(imgs)} images in "
+                        f"{len({t['pid'] for t in imgs})} viewer process(es)")
         if apps and relaunch:
             info.append(f"App-Fenster, die danach neu gestartet werden: {', '.join(apps)}")
         if CAPTURE_WARNING:
@@ -4803,8 +4995,19 @@ def cmd_kill(cfg: dict, spec: str | None, kill_all: bool, force: bool, timeout: 
     if not targets:
         print("Nichts zu beenden.")
         return 0
+    cats = {t["category"] for t in targets}
+    targets, windows = plan_images(targets, current)
+    if windows and not window_close_available():
+        # no single-window close (not COSMIC): the viewer ends as a whole, and the side
+        # effects below name the images that close with it
+        print("Single image windows cannot be closed here (no COSMIC window control): "
+              "the viewer process ends with all its images.")
+        targets, windows = targets + windows, []
+    for t in windows:
+        print(f"  {t['program']} (PID {t['pid']}) keeps running: {len(t['entries'])} "
+              "of its images are closed window by window")
     side = collateral(targets, current)
-    browsers = browser_targets(targets, {t["category"] for t in targets})
+    browsers = browser_targets(targets, cats)
     for line in side:
         print("  " + line)
     if side and interactive and not dry_run and not _ask_yes("Trotzdem beenden?"):
@@ -4816,12 +5019,16 @@ def cmd_kill(cfg: dict, spec: str | None, kill_all: bool, force: bool, timeout: 
         if not interactive or not _ask_yes("Browser wirklich beenden?"):
             targets = [t for t in targets if t not in browsers]
             print("Browser bleiben offen.")
-    log.info("kill from %s: %d processes%s", path, len(targets), " (dry-run)" if dry_run else "")
+    log.info("kill from %s: %d processes, %d viewers with single image windows%s", path,
+             len(targets), len(windows), " (dry-run)" if dry_run else "")
     confirm = _ask_yes if interactive else None
     wait = cfg["kill_timeout"] if timeout is None else timeout
+    code = close_image_windows(windows, wait, dry_run) if windows else 0
+    if not targets:
+        return code
     with Overlay("Beenden", cfg["overlay"] and not dry_run):
-        return terminate(targets, wait, force, dry_run, confirm_force=confirm,
-                         relaunch=relaunch)
+        return max(code, terminate(targets, wait, force, dry_run, confirm_force=confirm,
+                                   relaunch=relaunch))
 
 
 def cmd_list() -> int:

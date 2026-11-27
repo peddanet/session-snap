@@ -91,6 +91,11 @@
 # so a hanging step shows. A red check prints its failed log (gh run view
 # --log-failed, last 40 lines). The CI run of a tag is watched the same way.
 #
+# Only the REQUIRED checks of a pull request count (gh pr checks --required):
+# when develop holds nothing new, merge/vX.Y.Z is the tagged commit itself,
+# and its finished tag run (release check, skipped gates) would otherwise
+# look like finished checks of the pull request (session-snap 2.1.4).
+#
 # gh versions: the script uses only "gh pr checks" without --json (its
 # tab-separated output; Ubuntu 24.04 ships gh 2.45, which has no --json for
 # this command) and "gh run view/list --json" (in gh since 2.x); job
@@ -250,7 +255,10 @@ merge_pull_request() {
     die "pull request #$1 could not be merged - see GitHub; nothing else changed"
 }
 
-# pr_checks PR - ask GitHub for the checks of pull request $1. PR_LINES gets
+# pr_checks PR - ask GitHub for the required checks of pull request $1
+# (--required, in gh since 2.x: the head commit can also carry finished
+# checks of another run, e.g. the release check of a tag when merge/vX.Y.Z
+# is the tagged commit itself; they must not count). PR_LINES gets
 # one line "name<TAB>state<TAB>elapsed<TAB>link" per check (state: pass, fail,
 # pending, skipping, cancel), as gh prints them without a terminal; this form
 # exists in every gh version, --json does not (gh 2.45 of Ubuntu 24.04).
@@ -261,7 +269,7 @@ PR_LINES="" CHECKS_ERROR="" PROGRESS_SHOWN=0
 declare -A STEP_AT=() FIRST_SEEN=()
 pr_checks() {
     local out
-    out="$(gh pr checks "$1" 2>&1 </dev/null)" || true
+    out="$(gh pr checks "$1" --required 2>&1 </dev/null)" || true
     PR_LINES="$(printf '%s\n' "$out" \
         | awk -F'\t' 'NF >= 4 && $2 ~ /^(pass|fail|pending|skipping|cancel)$/')" || true
     CHECKS_ERROR=""
@@ -292,6 +300,8 @@ for job in jobs:
     if not step:
         step = "queued for a runner" if job.get("status") in ("queued", "waiting", "pending") \
             else next((s.get("name", "") for s in steps if s.get("status") != "completed"), "")
+    if not step and job.get("status") == "in_progress":
+        step = "starting"
     seconds = "-"  # never an empty field: read with IFS=tab would skip it
     started = job.get("startedAt") or ""
     if started and not started.startswith("0001"):

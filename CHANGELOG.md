@@ -8,6 +8,29 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+### Added
+
+- `kill`: single image windows are closed through COSMIC (request `close` of
+  `zcosmic_toplevel_manager_v1`). An image viewer that also shows images which were not chosen
+  or are not in the snapshot keeps running, and only the chosen image windows close; a viewer
+  whose open images are all chosen ends as a whole. Without COSMIC window control the viewer
+  ends as before and the side effects name the other images.
+
+### Fixed
+
+- Tests T44 and T56 failed on a desktop with an image viewer open: the capture saw the
+  real viewer, which took over the windows of the test's dummy viewer (T44) and added an
+  image the kill dialog asked about (T56). The suite now scans only its own dummies, also
+  in every child (`SESSION_SNAP_ONLY_PATH`). The failures were taken for an effect of high
+  system load before.
+- `kill` counted image viewer processes instead of images: a snapshot with 19 images in two
+  viewer processes showed "Bilder (2/2)". Images are now offered and counted one by one.
+
+- `tools/release.sh` (dev-conventions bundle v20) counts only the required checks of a pull
+  request. When `develop` held nothing new, `merge/vX.Y.Z` was the tagged commit and the
+  finished tag run on it ended the wait before the checks of the pull request had started
+  (2.1.4: the merge back into `develop` was refused five times).
+
 ## [2.1.4] - 2026-11-26
 
 ### Changed
