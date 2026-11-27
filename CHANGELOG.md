@@ -8,6 +8,8 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-11-28
+
 ### Changed
 
 - Development tools of dev-conventions bundle v21: `tools/release.sh` lets GitHub check the
