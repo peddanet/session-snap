@@ -43,6 +43,7 @@ Table: Changes from version 1.7.0 to 2.0.0.
 | next | Overlay | Progress card above all windows with spinner, progress bar "n / m" and time left; blocks keyboard (and in style `fullscreen` the mouse) except Esc / Ctrl+C / *Abbrechen*; styles `fullscreen`, `corner`, `notify`, `off` ([busy overlay](#sec-overlay)). |
 | next | Menu entry | `session-snap desktop-entry` (run by `install.sh`): entry with icon in the application menu, opens the menu in a terminal ([menu entry](#sec-menuentry)). |
 | 2.0.0 | Terminate | Kill compares the selection with what is open now, offers to save a new snapshot first, lists windows that close as a side effect and keeps browsers unless confirmed; the window list is retried under load and an incomplete capture is announced ([UC6](#uc6)). |
+| next | Terminate | Images are counted and offered **one by one** (before: one line per viewer process, e.g. "Bilder (2/2)" for 19 images). A viewer whose open images are all chosen ends as a whole; one that also shows images not chosen or not in the snapshot keeps running, and only the chosen image windows are closed through COSMIC (request `close` of `zcosmic_toplevel_manager_v1`). Without COSMIC window control the viewer ends as a whole and the side effects name the other images ([termination](developer.md#sec-terminate)). |
 
 
 Table: Changes from version 1.4.0 to 1.7.0.

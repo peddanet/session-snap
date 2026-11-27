@@ -8,7 +8,18 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+### Added
+
+- `kill`: single image windows are closed through COSMIC (request `close` of
+  `zcosmic_toplevel_manager_v1`). An image viewer that also shows images which were not chosen
+  or are not in the snapshot keeps running, and only the chosen image windows close; a viewer
+  whose open images are all chosen ends as a whole. Without COSMIC window control the viewer
+  ends as before and the side effects name the other images.
+
 ### Fixed
+
+- `kill` counted image viewer processes instead of images: a snapshot with 19 images in two
+  viewer processes showed "Bilder (2/2)". Images are now offered and counted one by one.
 
 - `tools/release.sh` (dev-conventions bundle v20) counts only the required checks of a pull
   request. When `develop` held nothing new, `merge/vX.Y.Z` was the tagged commit and the

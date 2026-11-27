@@ -980,9 +980,9 @@ class T4_Kill(Base):
         self.assertIn("Auswahl treffen", read(4))
         os.write(fd, b"2")
         folded = read(1)
-        self.assertIn("Alle Programme (3/3 gewaehlt)", folded)
+        self.assertIn("Alle Programme (4/4 gewaehlt)", folded)   # images count one by one
         self.assertIn("Videos (1/1 gewaehlt)", folded)
-        self.assertIn("Bilder (1/1 gewaehlt)", folded)
+        self.assertIn("Bilder (2/2 gewaehlt)", folded)          # 2 images, 1 eog process
         self.assertIn("Kurztasten:", folded)                # legend line 2
         self.assertNotIn("a.png", folded)                   # folded: no file lines yet
         # (curses redraws only changed characters afterwards: outcome is checked instead)
@@ -1321,7 +1321,8 @@ class T7_Exact_Program(Base):
 class FakeCosmic:
     """Tiny Wayland server speaking the wire protocol of wl_display/wl_registry and of
     zcosmic_toplevel_info_v1 (v1) / zcosmic_toplevel_manager_v1 as defined in the
-    cosmic-protocols XML files. Windows are added with add_window(); set_maximized and
+    cosmic-protocols XML files. Windows are added with add_window(); close removes a
+    window (closed event) unless it carries keep_open; set_maximized and
     set_fullscreen(toplevel, null) requests are recorded and answered with a state event
     containing 0 (maximized) or 3 (fullscreen). Like cosmic-comp, fullscreen is executed
     without being announced as a capability."""
@@ -1332,7 +1333,7 @@ class FakeCosmic:
         self.srv.bind(path)
         self.srv.listen(4)
         self.conns, self.windows, self.maximized, self.activated = [], [], [], []
-        self.fullscreen = []
+        self.fullscreen, self.closed = [], []
         self.lock = threading.Lock()
         self.stop = False
         self.t = threading.Thread(target=self._accept, daemon=True)
@@ -1412,6 +1413,21 @@ class FakeCosmic:
                 for hid, w in st["handles"].items():
                     self._send(st, self._msg(hid, 8, self._states(w)) + self._msg(hid, 1))
 
+    def remove(self, win):
+        """The window closes: a closed event to every client that knows it.
+
+        Args:
+            win (dict): The window.
+        """
+        with self.lock:
+            if win in self.windows:
+                self.windows.remove(win)
+            for st in self.conns:
+                for hid, w in list(st["handles"].items()):
+                    if w is win:
+                        self._send(st, self._msg(hid, 0))
+                        del st["handles"][hid]
+
     def _serve(self, st):
         buf, c = b"", st["sock"]
         names = {1: "zcosmic_toplevel_info_v1", 2: "zcosmic_toplevel_manager_v1", 3: "wl_seat"}
@@ -1453,6 +1469,11 @@ class FakeCosmic:
                     else:
                         caps = struct.pack(f"={len(self.caps)}I", *self.caps)
                         self._send(st, self._msg(oid, 0, struct.pack("=I", len(caps)) + caps))
+                elif typ == "zcosmic_toplevel_manager_v1" and op == 1:   # close
+                    win = st["handles"].get(struct.unpack_from("=I", p)[0])
+                    if win is not None and not win.get("keep_open"):
+                        self.closed.append((win["app_id"], win["title"]))
+                        threading.Thread(target=self.remove, args=(win,)).start()
                 elif typ == "zcosmic_toplevel_manager_v1" and op == 2:   # activate
                     win = st["handles"].get(struct.unpack_from("=I", p)[0])
                     if win is not None:
@@ -1494,6 +1515,49 @@ class T8_Maximize(unittest.TestCase):
     def tearDown(self):
         self.env.stop()
         shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_89_close_single_image_windows(self):
+        """COSMIC close request: the chosen image windows close, the others stay; a window
+        that refuses or is missing is reported; without the capability or a compositor no
+        single window can be closed"""
+        srv = FakeCosmic(str(self.dir / "wayland-fake"))
+        try:
+            self.assertTrue(ss.window_close_available())
+            for i in range(3):
+                srv.add_window("org.gnome.eog", f"b{i}.png")
+            stuck = srv.add_window("org.gnome.eog", "b3.png")
+            stuck["keep_open"] = True
+            imgs = [_e(ss.CAT_IMG, "eog", 100, [f"/p/b{i}.png"]) for i in range(5)]
+            target = dict(imgs[0], entries=imgs[:2])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = ss.close_image_windows([target], 3.0)
+            self.assertEqual(rc, 0, out.getvalue())
+            self.assertEqual(sorted(srv.closed), [("org.gnome.eog", "b0.png"),
+                                                  ("org.gnome.eog", "b1.png")])
+            self.assertEqual([w["title"] for w in srv.windows], ["b2.png", "b3.png"])
+            with contextlib.redirect_stdout(out):
+                rc = ss.close_image_windows([dict(imgs[0], entries=imgs[3:5])], 0.5)
+            self.assertEqual(rc, 1)
+            self.assertIn("window still open   eog (PID 100): b3.png", out.getvalue())
+            self.assertIn("no window found     eog (PID 100): b4.png", out.getvalue())
+            with contextlib.redirect_stdout(out):
+                ss.close_image_windows([target], 1.0, dry_run=True)
+            self.assertIn("DRY-RUN  close window  eog (PID 100): b1.png", out.getvalue())
+        finally:
+            srv.close()
+        os.environ["WAYLAND_DISPLAY"] = "wayland-nocap"
+        srv = FakeCosmic(str(self.dir / "wayland-nocap"), caps=(2, 3))
+        try:
+            self.assertFalse(ss.window_close_available())
+        finally:
+            srv.close()
+        os.environ["WAYLAND_DISPLAY"] = "wayland-none"
+        self.assertFalse(ss.window_close_available())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(ss.close_image_windows([target], 0.5), 1)
+        self.assertIn("Closing image windows failed", out.getvalue())
 
     def test_39_parse_and_match(self):
         """config 'maximize' parsing and app_id matching (mpv, vlc, org.gnome.eog,
@@ -2156,6 +2220,7 @@ class T11_Kill_Live(unittest.TestCase):
         self.chrome = _e(ss.CAT_BROWSER, "chrome", 200, cmd=["/opt/google/chrome/chrome"])
         self.chrome_img = _e(ss.CAT_IMG, "chrome", 200, ["/p/web.png"],
                              cmd=["/opt/google/chrome/chrome", "/p/web.png"])
+        self.closed: list | None = None        # window targets of the last run_kill
 
     def tearDown(self):
         ss.init_paths()
@@ -2187,7 +2252,7 @@ class T11_Kill_Live(unittest.TestCase):
             self.assertIn("alle offenen Bilder", m.call_args[0][1][0])
 
     def run_kill(self, current: list, snap: list, menus: list, asks: list,
-                 all_: bool = False) -> tuple[int, str, list | None]:
+                 all_: bool = False, close: bool = False) -> tuple[int, str, list | None]:
         """Run cmd_kill with synthetic entries.
 
         Args:
@@ -2196,9 +2261,11 @@ class T11_Kill_Live(unittest.TestCase):
             menus: Answers for menu() in order.
             asks: Answers for _ask_yes() in order.
             all_: Pass kill_all.
+            close: The compositor can close single windows (COSMIC).
 
         Returns:
-            (exit code, printed text, targets handed to terminate or None).
+            (exit code, printed text, targets handed to terminate or None); the window
+            targets handed to close_image_windows are kept in self.closed.
         """
         ss.save_snapshot(snap, "t")
         got = {}
@@ -2216,9 +2283,26 @@ class T11_Kill_Live(unittest.TestCase):
             """
             got["t"] = targets
             return 0
+        self.closed = None
+
+        def fake_close(targets, *_a, **_k):
+            """Record the window targets instead of closing windows.
+
+            Args:
+                targets (list): Window targets.
+                *_a: Ignored.
+                **_k: Ignored.
+
+            Returns:
+                int: Exit code 0.
+            """
+            self.closed = targets
+            return 0
         menus, asks = iter(menus), iter(asks)
         out = io.StringIO()
         with mock.patch.object(ss, "build_entries", return_value=current), \
+                mock.patch.object(ss, "window_close_available", return_value=close), \
+                mock.patch.object(ss, "close_image_windows", fake_close), \
                 mock.patch.object(ss, "protected_pids", return_value=set()), \
                 mock.patch.object(ss, "menu", lambda *a, **k: next(menus)), \
                 mock.patch.object(ss, "_ask_yes", lambda q: next(asks)), \
@@ -2254,6 +2338,39 @@ class T11_Kill_Live(unittest.TestCase):
         rc, out, t = self.run_kill(cur, snap[:1], [3, 1], [False])
         self.assertEqual((rc, t), (1, None))
         self.assertIn("schliesst auch 2", out)
+
+    def test_87_images_count_one_by_one(self):
+        """an image viewer with three images is offered as three targets; a viewer whose
+        open images are all chosen ends as a process, one with further images keeps
+        running and only the chosen windows close"""
+        nomacs = _e(ss.CAT_IMG, "nomacs", 300, ["/p/x.png"])
+        cur = self.imgs + [nomacs, self.chrome]
+        targets, _ = ss.kill_targets(self.cfg, cur, cur)
+        split = ss.split_images(targets)
+        self.assertEqual(sum(t["category"] == ss.CAT_IMG for t in split), 4)
+        self.assertEqual(len(split), 5)
+        eog = [t for t in split if t["pid"] == 100]
+        procs, windows = ss.plan_images(eog[:2] + [t for t in split if t["pid"] != 100], cur)
+        self.assertEqual(sorted(t["pid"] for t in procs), [200, 300])
+        self.assertEqual([(t["pid"], len(t["entries"])) for t in windows], [(100, 2)])
+        procs, windows = ss.plan_images(eog, cur)
+        self.assertEqual(([t["pid"] for t in procs], windows), ([100], []))
+        self.assertEqual(procs[0]["files"], [f"/p/b{i}.png" for i in range(3)])
+
+    def test_88_kill_closes_single_image_windows(self):
+        """two of three images in the snapshot: with COSMIC window control only their
+        windows close and the viewer keeps running; without it the viewer ends as a whole
+        and the side effects name the third image"""
+        rc, out, t = self.run_kill(self.imgs, self.imgs[:2], [3, 1], [], close=True)
+        self.assertEqual((rc, t), (0, None), out)
+        self.assertEqual([(x["pid"], len(x["entries"])) for x in self.closed], [(100, 2)])
+        self.assertIn("eog (PID 100) keeps running: 2 of its images", out)
+        rc, out, t = self.run_kill(self.imgs, self.imgs[:2], [3, 1], [True], close=False)
+        self.assertEqual((rc, [x["pid"] for x in t], self.closed), (0, [100], None))
+        self.assertIn("cannot be closed here", out)
+        self.assertIn("schliesst auch 1 weitere(s): b2.png", out)
+        rc, out, t = self.run_kill(self.imgs, self.imgs[:2], [], [], all_=True, close=True)
+        self.assertEqual((rc, t, len(self.closed[0]["entries"])), (0, None, 2))
 
     def test_84_no_targets_and_warning(self):
         """no running program from the snapshot: message plus the capture warning"""
