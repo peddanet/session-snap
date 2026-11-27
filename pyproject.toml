@@ -20,7 +20,7 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=7", "pytest-cov>=4", "pylint>=3", "mypy>=1.8",
+  "pytest>=7", "pytest-cov>=4", "pytest-xdist>=3", "pylint>=3", "mypy>=1.8",
   "pycodestyle>=2.11", "bandit[toml]>=1.7",
 ]
 

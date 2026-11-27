@@ -814,7 +814,10 @@ class T3_Restore(Base):
         Videos (ESC[B), Right unfolds (long path shown completely), Down x2 (ESC O B, ESC[B)
         to Bilder, Right, Down to a.png, Space, Enter -> only a.png is started"""
         self._snapshot_and_stop()
-        env = dict(os.environ, TERM="xterm-256color")
+        # curses takes LINES/COLUMNS from the environment before the terminal size;
+        # pytest-xdist workers may carry them (COLUMNS=80): the pty size must count
+        env = {k: v for k, v in os.environ.items() if k not in ("LINES", "COLUMNS")}
+        env["TERM"] = "xterm-256color"
         pid, fd = pty.fork()
         if pid == 0:  # child
             os.execvpe(sys.executable, PROG + ["restore", "-s", "latest"],
@@ -955,21 +958,28 @@ class T4_Kill(Base):
         es = self.start_standard_set()
         self._snapshot(es)
         keep = sorted(e["pid"] for e in es if e["category"] != "image")
-        env = dict(os.environ, TERM="xterm-256color")
+        # curses takes LINES/COLUMNS from the environment before the terminal size;
+        # pytest-xdist workers may carry them (COLUMNS=80): the pty size must count
+        env = {k: v for k, v in os.environ.items() if k not in ("LINES", "COLUMNS")}
+        env["TERM"] = "xterm-256color"
         pid, fd = pty.fork()
         if pid == 0:  # child
             os.execvpe(sys.executable, PROG + ["kill", "-s", "latest"],
                        env)
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 160, 0, 0))
 
-        def read(t):
-            """Read what the terminal shows until a text appears.
+        def read(t, until=None):
+            """Read what the terminal shows, for t seconds or until a text appears.
+
+            Waiting for the text instead of a fixed time keeps the test stable
+            when the tests run in parallel (check.sh with pytest-xdist).
 
             Args:
-                t (float): Seconds to read.
+                t (float): Seconds to read at most.
+                until (str | None): Stop as soon as this text was read.
 
             Returns:
-                str: Output read so far.
+                str: Output read so far, without terminal control sequences.
             """
             data, end = b"", time.monotonic() + t
             while time.monotonic() < end:
@@ -979,12 +989,25 @@ class T4_Kill(Base):
                         data += os.read(fd, 65536)
                     except OSError:
                         break
+                    if until and until in strip(data):
+                        break
+            return strip(data)
+
+        def strip(data):
+            """Decode terminal output and remove its control sequences.
+
+            Args:
+                data (bytes): Raw output of the terminal.
+
+            Returns:
+                str: Plain text.
+            """
             return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Z0-9]|\x1b[=>]", "",
                           data.decode("utf-8", "replace"))
 
-        self.assertIn("Auswahl treffen", read(4))
+        self.assertIn("Auswahl treffen", read(30, "Auswahl treffen"))
         os.write(fd, b"2")
-        folded = read(1)
+        folded = read(30, "Kurztasten:")                     # the legend is drawn last
         self.assertIn("Alle Programme (4/4 gewaehlt)", folded)   # images count one by one
         self.assertIn("Videos (1/1 gewaehlt)", folded)
         self.assertIn("Bilder (2/2 gewaehlt)", folded)          # 2 images, 1 eog process
@@ -996,7 +1019,7 @@ class T4_Kill(Base):
                     b" ",            # whole category Bilder on
                     b"\x1b[C"):      # unfold Bilder
             os.write(fd, key)
-            screen = read(0.5)
+            screen = read(30, "a.png") if key == b"\x1b[C" else read(0.5)
         self.assertIn("a.png", screen)
         os.write(fd, b"\r")
         screen = read(6)
@@ -2808,6 +2831,9 @@ class T14_More_Paths(CmdBase):
 
     def test_110_save_branches(self):
         """save: nothing, cancelled checklist, empty choice, label asked, kill after save"""
+        # build_entries is mocked: a warning left by an earlier capture in the same
+        # process would ask "Trotzdem speichern?" (order differs under pytest-xdist)
+        self.enterContext(mock.patch.object(ss, "CAPTURE_WARNING", ""))
         es = [_e(ss.CAT_IMG, "eog", 20, ["/p/a.png"]), _e(ss.CAT_REST, "gedit", 30)]
         with mock.patch.object(ss, "build_entries", return_value=[]), self.quiet():
             self.assertEqual(ss.cmd_save(self.cfg, None, True), 0)
