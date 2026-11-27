@@ -441,10 +441,15 @@ def read_stat(pid: int) -> tuple[str, int, int] | None:
 def scan_processes() -> dict:
     """All processes of the current user except this one: {pid: Proc}.
 
+    SESSION_SNAP_ONLY_PATH (set by the test suite) restricts the scan to programs whose
+    path starts with that prefix, so that programs of a running desktop - e.g. an image
+    viewer the user has open - never mix into a test.
+
     Returns:
         Mapping of process ID to Proc.
     """
     uid, me = os.getuid(), os.getpid()
+    only = os.environ.get("SESSION_SNAP_ONLY_PATH", "").encode()
     procs = {}
     for d in os.listdir("/proc"):
         if not d.isdigit():
@@ -462,6 +467,8 @@ def scan_processes() -> dict:
             continue  # process vanished or not accessible
         if not raw:
             continue  # kernel thread / zombie
+        if only and not raw.startswith(only):
+            continue  # test run: not one of the test's own programs
         st = read_stat(pid)
         if st is None:
             continue

@@ -597,7 +597,7 @@ The test suite `test_session_snap` uses only the Python standard library ([unitt
 * **Compositor tests** use `FakeCosmic`, a small Wayland server in the test suite that speaks the wire protocol of the COSMIC toplevel protocols: it announces windows, answers `set_maximized`, `activate` and `close`, and sends state changes to all connected clients.
 * **Interactive and installation tests** run the real program in a [pseudo-terminal](glossary.md#gl-pty) [[pypty]](#ref-pypty) or as a subprocess with a temporary `HOME`.
 
-**Safety on a real desktop.** Every process list in the tests is filtered to binaries inside the temporary directory; installation tests use a temporary `HOME`; the update test never executes a downloaded file. Real programs are never recorded into test snapshots and never signalled.
+**Safety on a real desktop.** Every process list in the tests is filtered to binaries inside the temporary directory - already in `scan_processes()`, through `SESSION_SNAP_ONLY_PATH`, which the suite sets for itself and every child, so a program open on the desktop (e.g. an image viewer) can neither take over the windows of a dummy nor appear in a kill dialog under test; installation tests use a temporary `HOME`; the update test never executes a downloaded file. Real programs are never recorded into test snapshots and never signalled.
 
 ```mermaid
 %% caption: Test architecture — isolation of the integration tests

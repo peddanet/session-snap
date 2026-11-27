@@ -124,7 +124,12 @@ class Base(unittest.TestCase):
         cls._env_backup = dict(os.environ)
         os.environ.update({"XDG_DATA_HOME": str(cls.tmp / "data"),
                            "XDG_DATA_DIRS": str(cls.tmp / "sys"),
-                           "SESSION_SNAP_DIR": str(cls.store)})
+                           "SESSION_SNAP_DIR": str(cls.store),
+                           # only the dummies of this run are scanned, here and in every
+                           # child: an image viewer open on the desktop took over the
+                           # windows of the dummy viewer (T44) and added an image the kill
+                           # dialog asked about (T56)
+                           "SESSION_SNAP_ONLY_PATH": str(cls.bin) + "/"})
         # isolated from a running desktop session: no Wayland socket (window list unknown,
         # as over SSH) and no real session process as reference for the appearance
         (cls.tmp / "run").mkdir(mode=0o700)

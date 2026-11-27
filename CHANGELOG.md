@@ -18,6 +18,11 @@ were delivered as single files and imported into the repository afterwards (see
 
 ### Fixed
 
+- Tests T44 and T56 failed on a desktop with an image viewer open: the capture saw the
+  real viewer, which took over the windows of the test's dummy viewer (T44) and added an
+  image the kill dialog asked about (T56). The suite now scans only its own dummies, also
+  in every child (`SESSION_SNAP_ONLY_PATH`). The failures were taken for an effect of high
+  system load before.
 - `kill` counted image viewer processes instead of images: a snapshot with 19 images in two
   viewer processes showed "Bilder (2/2)". Images are now offered and counted one by one.
 
