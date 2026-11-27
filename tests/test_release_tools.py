@@ -65,6 +65,11 @@ if cmd == ["pr", "create"]:
 if cmd == ["pr", "checks"] and "--json" in args:
     # like gh 2.45 (Ubuntu 24.04): no --json for this command
     sys.exit("unknown flag: --json\n\nUsage:  gh pr checks [<number> | <url> | <branch>] [flags]")
+if cmd == ["pr", "checks"] and "--required" not in args:
+    # without --required GitHub also lists the finished checks of other runs on
+    # the same commit (the tag run when merge/vX.Y.Z is the tagged commit)
+    print("release-check\tpass\t5s\thttps://github.com/o/r/actions/runs/40/job/7\t")
+    sys.exit(0)
 if cmd == ["pr", "checks"]:
     # registration: the first FAKE_GH_LATE answers (all with FAKE_GH_LISTED=0)
     # have no checks yet; check-polls counts the answers until the first list
@@ -830,3 +835,18 @@ def test_pr_checks_without_json(repo: tuple[Path, dict[str, str]]) -> None:
     calls = (Path(env["FAKE_GH_DIR"]) / "calls").read_text(encoding="utf-8").splitlines()
     assert any(call.startswith("pr checks") for call in calls)
     assert not any(call.startswith("pr checks") and "--json" in call for call in calls)
+
+
+def test_only_required_checks_count(repo: tuple[Path, dict[str, str]]) -> None:
+    """Every query asks for the required checks only (finished tag runs must not count).
+
+    Args:
+        repo: Prepared clone (fixture).
+    """
+    work, env = repo
+    commit(work, env, "feature/a", "develop", "a.txt")
+    done = release(work, env | {"FAKE_GH_LATE": "1", "RELEASE_WAIT": "30"}, "--merge-only", "--yes")
+    calls = (Path(env["FAKE_GH_DIR"]) / "calls").read_text(encoding="utf-8").splitlines()
+    checks = [call for call in calls if call.startswith("pr checks")]
+    assert checks and all("--required" in call for call in checks)
+    assert "release-check" not in done.stdout

@@ -8,6 +8,13 @@ were delivered as single files and imported into the repository afterwards (see
 
 ## [Unreleased]
 
+### Fixed
+
+- `tools/release.sh` (dev-conventions bundle v20) counts only the required checks of a pull
+  request. When `develop` held nothing new, `merge/vX.Y.Z` was the tagged commit and the
+  finished tag run on it ended the wait before the checks of the pull request had started
+  (2.1.4: the merge back into `develop` was refused five times).
+
 ## [2.1.4] - 2026-11-26
 
 ### Changed
